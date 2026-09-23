@@ -1,6 +1,6 @@
 # nexus-jar-sync
 
-`nexus-jar-sync` is intended to keep configured JAR artifacts synchronized from one or more Sonatype Nexus repositories. The current M0/M1 milestone provides the project foundation and validated, configuration-driven multi-target setup only. Nexus communication and downloading will be added in later milestones.
+`nexus-jar-sync` is intended to keep configured JAR artifacts synchronized from one or more Sonatype Nexus repositories. M0/M1 provide the project foundation and validated, configuration-driven multi-target setup. M2/M3 add reusable Nexus asset discovery with pagination and exact main/classifier filtering, plus independent per-target state storage and change detection.
 
 ## Requirements and setup
 
@@ -41,7 +41,9 @@ Validate configuration and list enabled targets:
 nexus-jar-sync --config config/config.yaml
 ```
 
-The command performs no network activity and creates no destination, state, or download files in this milestone.
+The command still performs no network activity and creates no destination, state, or download files. The Nexus client and state APIs are not yet orchestrated by the CLI.
+
+Downloading, downloaded-file checksum verification, state updates after successful downloads, retry execution, retention, and the full synchronization CLI are planned for later milestones.
 
 Run the tests with:
 
