@@ -18,6 +18,11 @@ from nexus_jar_sync.config import (
 from nexus_jar_sync.nexus_client import NexusClient, NexusClientError
 
 
+SHA256 = "a" * 64
+SHA1 = "b" * 40
+MD5 = "c" * 32
+
+
 class FakeResponse:
     def __init__(self, payload: Any, status_code: int = 200, json_error: Exception | None = None) -> None:
         self.payload = payload
@@ -88,8 +93,12 @@ def asset_item(
     filename = f"application-{version}{suffix}.{extension}"
     value: dict[str, Any] = {
         "path": path or f"com/example/application/{version}/{filename}",
-        "downloadUrl": download_url or f"https://nexus.example.com/repository/releases/{filename}",
-        "checksum": {"SHA256": "AABB", "sha1": "CCDD"} if checksum is None else checksum,
+        "downloadUrl": (
+            f"https://nexus.example.com/repository/releases/{filename}"
+            if download_url is None
+            else download_url
+        ),
+        "checksum": {"SHA256": SHA256.upper(), "sha1": SHA1} if checksum is None else checksum,
     }
     if metadata:
         value["maven2"] = {
@@ -250,7 +259,7 @@ def test_invalid_versions_do_not_expose_invalid_version_exception() -> None:
     assert "InvalidVersion" not in str(error.value)
 
 
-@pytest.mark.parametrize("checksum", [None, {}, {"sha256": "not-hex"}, {"sha512": "aabb"}])
+@pytest.mark.parametrize("checksum", [None, {}, {"sha256": "not-hex"}, {"sha512": "a" * 128}])
 def test_missing_or_malformed_checksums_fail(checksum: Any) -> None:
     item = asset_item(checksum=checksum)
     if checksum is None:
@@ -261,10 +270,99 @@ def test_missing_or_malformed_checksums_fail(checksum: Any) -> None:
 
 def test_checksums_are_normalized_immutable_and_prefer_sha256() -> None:
     asset = NexusClient(FakeSession(page(asset_item()))).get_latest_asset(make_target())
-    assert dict(asset.checksums) == {"sha256": "aabb", "sha1": "ccdd"}
-    assert asset.canonical_checksum == ("sha256", "aabb")
+    assert dict(asset.checksums) == {"sha256": SHA256, "sha1": SHA1}
+    assert asset.canonical_checksum == ("sha256", SHA256)
     with pytest.raises(TypeError):
-        asset.checksums["md5"] = "eeff"  # type: ignore[index]
+        asset.checksums["md5"] = MD5  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    "digest",
+    ["a" * 63, "a" * 65, "g" * 64],
+    ids=["short", "long", "non-hex"],
+)
+def test_malformed_sha256_digest_is_rejected(digest: str) -> None:
+    with pytest.raises(NexusClientError, match="no usable checksum"):
+        NexusClient(FakeSession(page(asset_item(checksum={"sha256": digest})))).get_latest_asset(
+            make_target()
+        )
+
+
+@pytest.mark.parametrize(
+    ("algorithm", "digest"),
+    [("md5", MD5), ("sha1", SHA1), ("sha256", SHA256)],
+)
+def test_supported_checksum_lengths_are_accepted(algorithm: str, digest: str) -> None:
+    asset = NexusClient(
+        FakeSession(page(asset_item(checksum={algorithm: digest.upper()})))
+    ).get_latest_asset(make_target())
+    assert dict(asset.checksums) == {algorithm: digest}
+
+
+def test_malformed_preferred_checksum_uses_valid_supported_fallback() -> None:
+    asset = NexusClient(
+        FakeSession(page(asset_item(checksum={"sha256": "a" * 63, "SHA1": SHA1.upper()})))
+    ).get_latest_asset(make_target())
+    assert dict(asset.checksums) == {"sha1": SHA1}
+    assert asset.canonical_checksum == ("sha1", SHA1)
+
+
+@pytest.mark.parametrize(
+    "download_url",
+    [
+        "https://public.example.com/repository/application.jar",
+        "http://proxy.example.net/repository/application.jar",
+    ],
+)
+def test_valid_http_download_urls_are_accepted(download_url: str) -> None:
+    asset = NexusClient(
+        FakeSession(page(asset_item(download_url=download_url)))
+    ).get_latest_asset(make_target())
+    assert asset.download_url == download_url
+
+
+@pytest.mark.parametrize(
+    "download_url",
+    [
+        "",
+        "/repository/application.jar",
+        "https:///repository/application.jar",
+        "file:///tmp/application.jar",
+        "ftp://files.example.com/application.jar",
+        "javascript:alert(1)",
+        "https://private-user@public.example.com/application.jar",
+        "https://:private-password@public.example.com/application.jar",
+    ],
+    ids=[
+        "empty",
+        "relative",
+        "missing-hostname",
+        "file-scheme",
+        "ftp-scheme",
+        "javascript-scheme",
+        "embedded-username",
+        "embedded-password",
+    ],
+)
+def test_invalid_or_unsafe_download_urls_are_rejected(download_url: str) -> None:
+    with pytest.raises(NexusClientError, match="invalid download URL") as error:
+        NexusClient(FakeSession(page(asset_item(download_url=download_url)))).get_latest_asset(
+            make_target()
+        )
+    if download_url:
+        assert download_url not in str(error.value)
+
+
+def test_download_url_credentials_are_not_exposed_in_error() -> None:
+    username = "private-download-user"
+    password = "private-download-password"
+    unsafe_url = f"https://{username}:{password}@public.example.com/application.jar"
+    with pytest.raises(NexusClientError) as error:
+        NexusClient(FakeSession(page(asset_item(download_url=unsafe_url)))).get_latest_asset(
+            make_target()
+        )
+    assert username not in str(error.value)
+    assert password not in str(error.value)
 
 
 def test_conflicting_duplicate_latest_assets_fail() -> None:

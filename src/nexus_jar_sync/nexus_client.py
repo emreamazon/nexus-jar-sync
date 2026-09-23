@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from types import MappingProxyType
 from typing import Any, Mapping, Protocol
+from urllib.parse import urlsplit
 
 from packaging.version import InvalidVersion, Version
 import requests
@@ -182,7 +183,7 @@ class NexusClient:
             raise NexusClientError(f"Nexus returned a malformed asset for target '{target.id}'")
         path = item.get("path")
         download_url = item.get("downloadUrl")
-        if not isinstance(path, str) or not path or not isinstance(download_url, str) or not download_url:
+        if not isinstance(path, str) or not path:
             raise NexusClientError(f"Nexus returned a malformed asset for target '{target.id}'")
 
         coordinates = self._coordinates(item, path, target)
@@ -194,12 +195,13 @@ class NexusClient:
         except InvalidVersion:
             raise _UnsortableVersion from None
 
+        validated_download_url = self._download_url(download_url, target)
         checksums = self._checksums(item.get("checksum"), target)
         return _Candidate(
             asset=NexusAsset(
                 version=version,
                 filename=filename,
-                download_url=download_url,
+                download_url=validated_download_url,
                 path=path,
                 checksums=checksums,
             ),
@@ -262,19 +264,51 @@ class NexusClient:
         return version, filename
 
     @staticmethod
+    def _download_url(value: Any, target: TargetConfig) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise NexusClientError(
+                f"Nexus asset has an invalid download URL for target '{target.id}'"
+            )
+        try:
+            parsed = urlsplit(value)
+            hostname = parsed.hostname
+            username = parsed.username
+            password = parsed.password
+        except ValueError:
+            raise NexusClientError(
+                f"Nexus asset has an invalid download URL for target '{target.id}'"
+            ) from None
+        if (
+            parsed.scheme.lower() not in {"http", "https"}
+            or not parsed.netloc
+            or not hostname
+            or username is not None
+            or password is not None
+        ):
+            raise NexusClientError(
+                f"Nexus asset has an invalid download URL for target '{target.id}'"
+            )
+        return value
+
+    @staticmethod
     def _checksums(value: Any, target: TargetConfig) -> Mapping[str, str]:
         if not isinstance(value, dict):
             raise NexusClientError(
                 f"Nexus asset has no usable checksum for target '{target.id}'"
             )
         normalized: dict[str, str] = {}
+        required_lengths = {"md5": 32, "sha1": 40, "sha256": 64}
         for raw_algorithm, raw_checksum in value.items():
             if not isinstance(raw_algorithm, str) or not isinstance(raw_checksum, str):
                 continue
             algorithm = raw_algorithm.strip().lower()
             checksum = raw_checksum.strip().lower()
-            if algorithm in {"sha256", "sha1", "md5"} and checksum and all(
-                character in "0123456789abcdef" for character in checksum
+            # Ignore malformed individual entries so a valid supported fallback
+            # digest in the same Nexus response can still be used.
+            if (
+                algorithm in required_lengths
+                and len(checksum) == required_lengths[algorithm]
+                and all(character in "0123456789abcdef" for character in checksum)
             ):
                 normalized[algorithm] = checksum
         if not normalized:

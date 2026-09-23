@@ -16,12 +16,16 @@ from nexus_jar_sync.state import (
 )
 
 
+SHA256 = "a" * 64
+SHA1 = "b" * 40
+
+
 def make_state(**overrides: str) -> TargetState:
     values = {
         "version": "1.0.0",
         "path": "com/example/application/1.0.0/application-1.0.0.jar",
         "checksum_algorithm": "sha256",
-        "checksum": "aabb",
+        "checksum": SHA256,
         "downloaded_at": "2026-09-23T15:30:00+03:00",
     }
     values.update(overrides)
@@ -34,7 +38,7 @@ def make_asset(**overrides: object) -> NexusAsset:
         "filename": "application-1.0.0.jar",
         "download_url": "https://nexus.example.com/application-1.0.0.jar",
         "path": "com/example/application/1.0.0/application-1.0.0.jar",
-        "checksums": {"sha256": "aabb", "sha1": "ccdd"},
+        "checksums": {"sha256": SHA256, "sha1": SHA1},
     }
     values.update(overrides)
     return NexusAsset(**values)  # type: ignore[arg-type]
@@ -142,11 +146,11 @@ def test_failed_replace_preserves_existing_state_and_cleans_temp(
     [
         (None, make_asset(), ChangeDecision.FIRST_RUN),
         (make_state(), make_asset(version="2.0"), ChangeDecision.VERSION_CHANGED),
-        (make_state(), make_asset(checksums={"sha256": "different"}), ChangeDecision.CHECKSUM_CHANGED),
+        (make_state(), make_asset(checksums={"sha256": "d" * 64}), ChangeDecision.CHECKSUM_CHANGED),
         (make_state(), make_asset(), ChangeDecision.CURRENT),
         (
-            make_state(checksum_algorithm="sha1", checksum="ccdd"),
-            make_asset(checksums={"sha256": "aabb"}),
+            make_state(checksum_algorithm="sha1", checksum=SHA1),
+            make_asset(checksums={"sha256": SHA256}),
             ChangeDecision.CHECKSUM_CHANGED,
         ),
         (
