@@ -4,7 +4,7 @@
 
 M4/M5 add separately callable streamed downloads with checksum verification, same-directory temporary files and atomic deployment, plus target-specific local artifact retention.
 
-M6/M7 add configurable rotating file logging, bounded fixed-delay retry for transient discovery and download failures, and a one-shot synchronization service. The service processes enabled targets sequentially, isolates expected per-target failures, and saves state only after download and retention succeed.
+M6/M7 add configurable rotating file logging, bounded fixed-delay retry for transient discovery and download failures, and a one-shot synchronization service. M8/M9 connect that service to the CLI, including a read-only dry-run mode.
 
 ## Requirements and setup
 
@@ -39,15 +39,25 @@ export LIBRARY_NEXUS_PASSWORD="other-password"
 
 ## Run
 
-Validate configuration and list enabled targets:
+Run one synchronization pass over all enabled targets:
 
 ```text
 nexus-jar-sync --config config/config.yaml
 ```
 
-The command still performs configuration validation only: it performs no network activity, retry, synchronization, or logging setup and creates no destination, state, log, or download files. The synchronization service is available as a library API but is not yet connected to the CLI.
+Changed artifacts are checksum-verified, atomically installed, and then processed by the configured retention policy. State is updated only after the target succeeds.
 
-Active CLI synchronization and `--dry-run` belong to M8. Scheduling remains external and is not implemented by this project.
+Preview discovery and change decisions without downloading, applying retention, writing state, or creating destination files:
+
+```text
+nexus-jar-sync --config config/config.yaml --dry-run
+```
+
+Dry-run reads Nexus metadata and existing state, and still performs bounded discovery retries. It does not create or replace JARs, create destination or state directories, run retention, or save state. Configured logging may create or append to its log file.
+
+Both modes print a deterministic per-target summary. Exit code `0` means all enabled targets completed successfully (including targets that would update during a dry run), `1` means at least one target failed, and `2` means configuration loading or logging initialization failed. Unexpected programming errors and interrupts are not hidden.
+
+Active one-shot operation is implemented. Scheduling remains external and is planned for M10.
 
 Run the tests with:
 

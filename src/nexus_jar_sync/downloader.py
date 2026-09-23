@@ -43,7 +43,12 @@ class ArtifactDownloader:
     CHUNK_SIZE = 1024 * 1024
 
     def __init__(self, session: _Session | None = None) -> None:
+        self._owns_session = session is None
         self._session = session if session is not None else requests.Session()
+
+    def close(self) -> None:
+        if self._owns_session:
+            self._session.close()
 
     def download(self, asset: NexusAsset, target: TargetConfig) -> DownloadResult:
         final_path = self._validated_final_path(asset, target)

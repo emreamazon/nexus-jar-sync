@@ -59,7 +59,12 @@ class NexusClient:
     """Discover the newest exact Maven asset for a configured target."""
 
     def __init__(self, session: _Session | None = None) -> None:
+        self._owns_session = session is None
         self._session = session if session is not None else requests.Session()
+
+    def close(self) -> None:
+        if self._owns_session:
+            self._session.close()
 
     def get_latest_asset(self, target: TargetConfig) -> NexusAsset:
         endpoint = f"{target.nexus.url}/service/rest/v1/search/assets"

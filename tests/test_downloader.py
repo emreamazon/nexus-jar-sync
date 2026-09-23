@@ -493,3 +493,21 @@ def test_atomic_replacement_failure_is_not_retryable(
     with pytest.raises(DownloadError) as caught:
         ArtifactDownloader(FakeSession(FakeResponse())).download(make_asset(), make_target(tmp_path))
     assert caught.value.retryable is False
+
+
+def test_close_does_not_close_injected_session() -> None:
+    session = FakeSession(FakeResponse())
+    session.close = lambda: pytest.fail("injected session was closed")  # type: ignore[attr-defined]
+    ArtifactDownloader(session).close()
+
+
+def test_close_closes_owned_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    class OwnedSession:
+        closed = False
+        def close(self) -> None:
+            self.closed = True
+    session = OwnedSession()
+    monkeypatch.setattr("nexus_jar_sync.downloader.requests.Session", lambda: session)
+    downloader = ArtifactDownloader()
+    downloader.close()
+    assert session.closed

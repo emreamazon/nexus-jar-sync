@@ -21,6 +21,7 @@ from nexus_jar_sync.state import ChangeDecision, StateError, StateStore, TargetS
 class TargetSyncStatus(Enum):
     CURRENT = "current"
     UPDATED = "updated"
+    WOULD_UPDATE = "would_update"
     FAILED = "failed"
 
 
@@ -49,6 +50,10 @@ class SyncSummary:
     def failed_count(self) -> int:
         return sum(result.status is TargetSyncStatus.FAILED for result in self.results)
 
+    @property
+    def would_update_count(self) -> int:
+        return sum(result.status is TargetSyncStatus.WOULD_UPDATE for result in self.results)
+
 
 class SyncService:
     def __init__(
@@ -70,14 +75,18 @@ class SyncService:
         self._clock = clock
         self._logger = logger or logging.getLogger("nexus_jar_sync.sync")
 
-    def run(self, config: AppConfig) -> SyncSummary:
+    def run(self, config: AppConfig, *, dry_run: bool = False) -> SyncSummary:
         enabled_targets = config.enabled_targets
-        self._logger.info("Run started with %d enabled targets", len(enabled_targets))
+        self._logger.info(
+            "%s started with %d enabled targets",
+            "Dry-run" if dry_run else "Run",
+            len(enabled_targets),
+        )
         store = self._state_store_factory(config.state.directory)
         results: list[TargetSyncResult] = []
         for target in enabled_targets:
             try:
-                results.append(self._process_target(target, store))
+                results.append(self._process_target(target, store, dry_run=dry_run))
             except (NexusClientError, DownloadError, LifecycleError, StateError) as error:
                 self._logger.error("Target %s failed: %s", target.id, error)
                 results.append(
@@ -91,14 +100,28 @@ class SyncService:
                 )
         summary = SyncSummary(tuple(results))
         self._logger.info(
-            "Run finished: %d updated, %d current, %d failed",
+            "%s finished: %d updated, %d would update, %d current, %d failed",
+            "Dry-run" if dry_run else "Run",
             summary.updated_count,
+            summary.would_update_count,
             summary.current_count,
             summary.failed_count,
         )
         return summary
 
-    def _process_target(self, target: TargetConfig, store: StateStore) -> TargetSyncResult:
+    def close(self) -> None:
+        """Close production-owned resources without closing injected sessions."""
+        for component in (self._nexus_client, self._downloader):
+            close = getattr(component, "close", None)
+            if close is not None:
+                try:
+                    close()
+                except Exception:
+                    pass
+
+    def _process_target(
+        self, target: TargetConfig, store: StateStore, *, dry_run: bool
+    ) -> TargetSyncResult:
         self._logger.info("Target %s: processing started", target.id)
         asset = self._retry.run(
             lambda: self._nexus_client.get_latest_asset(target),
@@ -121,6 +144,15 @@ class SyncService:
             )
 
         self._logger.info("Target %s: change detected: %s", target.id, change.value)
+        if dry_run:
+            self._logger.info("Target %s: would update to version %s", target.id, asset.version)
+            return TargetSyncResult(
+                target_id=target.id,
+                status=TargetSyncStatus.WOULD_UPDATE,
+                version=asset.version,
+                change=change,
+                message=f"Would update to version {asset.version}",
+            )
         download = self._retry.run(
             lambda: self._downloader.download(asset, target),
             retries=target.network.retries,

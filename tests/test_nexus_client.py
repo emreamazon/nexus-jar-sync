@@ -417,3 +417,21 @@ def test_schema_and_selection_failures_are_not_retryable(response: FakeResponse)
     with pytest.raises(NexusClientError) as caught:
         NexusClient(FakeSession(response)).get_latest_asset(make_target())
     assert caught.value.retryable is False
+
+
+def test_close_does_not_close_injected_session() -> None:
+    session = FakeSession()
+    session.close = lambda: pytest.fail("injected session was closed")  # type: ignore[attr-defined]
+    NexusClient(session).close()
+
+
+def test_close_closes_owned_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    class OwnedSession:
+        closed = False
+        def close(self) -> None:
+            self.closed = True
+    session = OwnedSession()
+    monkeypatch.setattr("nexus_jar_sync.nexus_client.requests.Session", lambda: session)
+    client = NexusClient()
+    client.close()
+    assert session.closed

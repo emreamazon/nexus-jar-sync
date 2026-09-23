@@ -440,3 +440,90 @@ def test_credentials_do_not_appear_in_failed_result_or_logs(tmp_path: Path) -> N
     assert "Run finished" in combined
     assert username not in combined
     assert password not in combined
+
+
+@pytest.mark.parametrize(
+    ("state", "decision"),
+    [
+        (None, ChangeDecision.FIRST_RUN),
+        (make_state("1.0"), ChangeDecision.VERSION_CHANGED),
+        (make_state(checksum="b" * 64), ChangeDecision.CHECKSUM_CHANGED),
+        (make_state(path="other/path.jar"), ChangeDecision.PATH_CHANGED),
+    ],
+)
+def test_dry_run_reports_changes_without_mutation(
+    tmp_path: Path, state: TargetState | None, decision: ChangeDecision
+) -> None:
+    target = make_target("one", tmp_path / "destination")
+    store = FakeStore({"one": state})
+    downloader = FakeDownloader()
+    lifecycle = FakeLifecycle()
+
+    summary = make_service(
+        FakeClient({"one": [make_asset()]}), downloader, lifecycle, store
+    ).run(app_config(tmp_path, target), dry_run=True)
+
+    assert summary.results[0].status is TargetSyncStatus.WOULD_UPDATE
+    assert summary.results[0].change is decision
+    assert summary.would_update_count == 1
+    assert downloader.calls == []
+    assert lifecycle.calls == []
+    assert store.saves == []
+    assert not target.destination.directory.exists()
+    assert not (tmp_path / "state").exists()
+
+
+def test_dry_run_current_target_remains_current_without_mutation(tmp_path: Path) -> None:
+    target = make_target("one", tmp_path / "destination")
+    store = FakeStore({"one": make_state()})
+    downloader = FakeDownloader()
+    lifecycle = FakeLifecycle()
+    summary = make_service(
+        FakeClient({"one": [make_asset()]}), downloader, lifecycle, store
+    ).run(app_config(tmp_path, target), dry_run=True)
+    assert summary.results[0].status is TargetSyncStatus.CURRENT
+    assert downloader.calls == lifecycle.calls == []
+    assert store.saves == []
+
+
+def test_dry_run_preserves_order_retries_and_failure_isolation(tmp_path: Path) -> None:
+    targets = tuple(make_target(name, tmp_path / name, retries=1) for name in ("one", "two", "three"))
+    client = FakeClient(
+        {
+            "one": [NexusClientError("temporary", retryable=True), make_asset()],
+            "two": [NexusClientError("permanent")],
+            "three": [make_asset()],
+        }
+    )
+    store = FakeStore({"three": make_state()})
+    sleeps: list[float] = []
+    summary = make_service(
+        client, FakeDownloader(), FakeLifecycle(), store, sleeps=sleeps
+    ).run(app_config(tmp_path, *targets), dry_run=True)
+    assert [result.target_id for result in summary.results] == ["one", "two", "three"]
+    assert [result.status for result in summary.results] == [
+        TargetSyncStatus.WOULD_UPDATE,
+        TargetSyncStatus.FAILED,
+        TargetSyncStatus.CURRENT,
+    ]
+    assert sleeps == [2]
+
+
+def test_dry_run_isolates_expected_state_error_but_propagates_programming_error(
+    tmp_path: Path,
+) -> None:
+    target = make_target("one", tmp_path / "one")
+    expected = make_service(
+        FakeClient({"one": [make_asset()]}), FakeDownloader(), FakeLifecycle(),
+        FakeStore(load_failures={"one"}),
+    ).run(app_config(tmp_path, target), dry_run=True)
+    assert expected.results[0].status is TargetSyncStatus.FAILED
+
+    class BrokenStore(FakeStore):
+        def load(self, target_id: str) -> TargetState | None:
+            raise RuntimeError("programming defect")
+
+    with pytest.raises(RuntimeError, match="programming defect"):
+        make_service(
+            FakeClient({"one": [make_asset()]}), FakeDownloader(), FakeLifecycle(), BrokenStore()
+        ).run(app_config(tmp_path, target), dry_run=True)

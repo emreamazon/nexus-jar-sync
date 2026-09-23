@@ -3,19 +3,78 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from datetime import datetime, timezone
+import logging
 import sys
 
 from nexus_jar_sync.config import ConfigError, load_config
+from nexus_jar_sync.downloader import ArtifactDownloader
+from nexus_jar_sync.lifecycle import ArtifactLifecycleManager
+from nexus_jar_sync.logging_config import configure_logging
+from nexus_jar_sync.nexus_client import NexusClient
+from nexus_jar_sync.retry import RetryExecutor
+from nexus_jar_sync.state import StateStore
+from nexus_jar_sync.sync import SyncService, SyncSummary, TargetSyncStatus
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Validate nexus-jar-sync configuration.")
+    parser = argparse.ArgumentParser(description="Synchronize Nexus JAR artifacts.")
     parser.add_argument("--config", required=True, help="Path to the YAML configuration file")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Discover and report changes without modifying artifacts or state",
+    )
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def create_sync_service(logger: logging.Logger) -> SyncService:
+    """Construct explicit production dependencies for one synchronization run."""
+    nexus_client = NexusClient()
+    downloader = ArtifactDownloader()
+    retry_executor = RetryExecutor(logger=logger.getChild("retry"))
+    return SyncService(
+        nexus_client=nexus_client,
+        downloader=downloader,
+        lifecycle=ArtifactLifecycleManager(),
+        retry_executor=retry_executor,
+        state_store_factory=StateStore,
+        clock=lambda: datetime.now(timezone.utc),
+        logger=logger.getChild("sync"),
+    )
+
+
+def format_summary(summary: SyncSummary, *, dry_run: bool) -> str:
+    lines = ["Dry-Run Summary" if dry_run else "Sync Summary", ""]
+    for result in summary.results:
+        version = result.version or "-"
+        detail = result.change.value if result.change is not None else result.message
+        lines.append(
+            f"{result.target_id}  {result.status.value.upper()}  {version}  {detail}"
+        )
+    if summary.results:
+        lines.append("")
+    lines.extend(
+        [
+            f"Updated: {summary.updated_count}",
+            f"Would update: {summary.would_update_count}",
+            f"Current: {summary.current_count}",
+            f"Failed: {summary.failed_count}",
+        ]
+    )
+    if dry_run:
+        lines.extend(
+            ["", "No artifact, destination, retention, or state changes were made."]
+        )
+    return "\n".join(lines)
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    service_factory: Callable[[logging.Logger], SyncService] | None = None,
+) -> int:
     args = build_parser().parse_args(argv)
     try:
         config = load_config(args.config)
@@ -23,11 +82,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 2
 
-    print("Configuration loaded successfully.")
-    print(f"Enabled targets: {len(config.enabled_targets)}")
-    for target in config.enabled_targets:
-        print(f"- {target.id}")
-    return 0
+    try:
+        logger = configure_logging(config.logging)
+    except OSError:
+        print("Logging initialization failed.", file=sys.stderr)
+        return 2
+
+    factory = service_factory or create_sync_service
+    service = factory(logger)
+    try:
+        summary = service.run(config, dry_run=args.dry_run)
+    finally:
+        service.close()
+    print(format_summary(summary, dry_run=args.dry_run))
+    return 1 if summary.failed_count else 0
 
 
 if __name__ == "__main__":
