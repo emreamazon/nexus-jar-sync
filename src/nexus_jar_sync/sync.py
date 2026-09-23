@@ -85,19 +85,7 @@ class SyncService:
         store = self._state_store_factory(config.state.directory)
         results: list[TargetSyncResult] = []
         for target in enabled_targets:
-            try:
-                results.append(self._process_target(target, store, dry_run=dry_run))
-            except (NexusClientError, DownloadError, LifecycleError, StateError) as error:
-                self._logger.error("Target %s failed: %s", target.id, error)
-                results.append(
-                    TargetSyncResult(
-                        target_id=target.id,
-                        status=TargetSyncStatus.FAILED,
-                        version=None,
-                        change=None,
-                        message=str(error),
-                    )
-                )
+            results.append(self._process_target(target, store, dry_run=dry_run))
         summary = SyncSummary(tuple(results))
         self._logger.info(
             "%s finished: %d updated, %d would update, %d current, %d failed",
@@ -122,72 +110,84 @@ class SyncService:
     def _process_target(
         self, target: TargetConfig, store: StateStore, *, dry_run: bool
     ) -> TargetSyncResult:
-        self._logger.info("Target %s: processing started", target.id)
-        asset = self._retry.run(
-            lambda: self._nexus_client.get_latest_asset(target),
-            retries=target.network.retries,
-            retry_delay_seconds=target.network.retry_delay_seconds,
-            operation_name="asset discovery",
-            target_id=target.id,
-        )
-        self._logger.info("Target %s: discovered version %s", target.id, asset.version)
-        state = store.load(target.id)
-        change = determine_change(state, asset)
-        if change is ChangeDecision.CURRENT:
-            self._logger.info("Target %s: current; no change", target.id)
+        asset: NexusAsset | None = None
+        change: ChangeDecision | None = None
+        try:
+            self._logger.info("Target %s: processing started", target.id)
+            asset = self._retry.run(
+                lambda: self._nexus_client.get_latest_asset(target),
+                retries=target.network.retries,
+                retry_delay_seconds=target.network.retry_delay_seconds,
+                operation_name="asset discovery",
+                target_id=target.id,
+            )
+            self._logger.info("Target %s: discovered version %s", target.id, asset.version)
+            state = store.load(target.id)
+            change = determine_change(state, asset)
+            if change is ChangeDecision.CURRENT:
+                self._logger.info("Target %s: current; no change", target.id)
+                return TargetSyncResult(
+                    target_id=target.id,
+                    status=TargetSyncStatus.CURRENT,
+                    version=asset.version,
+                    change=change,
+                    message="Artifact is current",
+                )
+
+            self._logger.info("Target %s: change detected: %s", target.id, change.value)
+            if dry_run:
+                self._logger.info("Target %s: would update to version %s", target.id, asset.version)
+                return TargetSyncResult(
+                    target_id=target.id,
+                    status=TargetSyncStatus.WOULD_UPDATE,
+                    version=asset.version,
+                    change=change,
+                    message=f"Would update to version {asset.version}",
+                )
+            download = self._retry.run(
+                lambda: self._downloader.download(asset, target),
+                retries=target.network.retries,
+                retry_delay_seconds=target.network.retry_delay_seconds,
+                operation_name="artifact download",
+                target_id=target.id,
+            )
+            self._validate_download_result(download, asset, target)
+            self._logger.info(
+                "Target %s: downloaded %d bytes", target.id, download.bytes_written
+            )
+            removed = self._lifecycle.apply_retention(target, download.path)
+            self._logger.info("Target %s: retention removed %d files", target.id, len(removed))
+
+            timestamp = self._clock()
+            if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+                raise ValueError("sync clock must return a timezone-aware datetime")
+            store.save(
+                target.id,
+                TargetState(
+                    version=asset.version,
+                    path=asset.path,
+                    checksum_algorithm=download.checksum_algorithm,
+                    checksum=download.checksum,
+                    downloaded_at=timestamp.isoformat(),
+                ),
+            )
+            self._logger.info("Target %s: state updated", target.id)
             return TargetSyncResult(
                 target_id=target.id,
-                status=TargetSyncStatus.CURRENT,
+                status=TargetSyncStatus.UPDATED,
                 version=asset.version,
                 change=change,
-                message="Artifact is current",
+                message=f"Updated to version {asset.version}",
             )
-
-        self._logger.info("Target %s: change detected: %s", target.id, change.value)
-        if dry_run:
-            self._logger.info("Target %s: would update to version %s", target.id, asset.version)
+        except (NexusClientError, DownloadError, LifecycleError, StateError) as error:
+            self._logger.error("Target %s failed: %s", target.id, error)
             return TargetSyncResult(
                 target_id=target.id,
-                status=TargetSyncStatus.WOULD_UPDATE,
-                version=asset.version,
+                status=TargetSyncStatus.FAILED,
+                version=asset.version if asset is not None else None,
                 change=change,
-                message=f"Would update to version {asset.version}",
+                message=str(error),
             )
-        download = self._retry.run(
-            lambda: self._downloader.download(asset, target),
-            retries=target.network.retries,
-            retry_delay_seconds=target.network.retry_delay_seconds,
-            operation_name="artifact download",
-            target_id=target.id,
-        )
-        self._validate_download_result(download, asset, target)
-        self._logger.info(
-            "Target %s: downloaded %d bytes", target.id, download.bytes_written
-        )
-        removed = self._lifecycle.apply_retention(target, download.path)
-        self._logger.info("Target %s: retention removed %d files", target.id, len(removed))
-
-        timestamp = self._clock()
-        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
-            raise ValueError("sync clock must return a timezone-aware datetime")
-        store.save(
-            target.id,
-            TargetState(
-                version=asset.version,
-                path=asset.path,
-                checksum_algorithm=download.checksum_algorithm,
-                checksum=download.checksum,
-                downloaded_at=timestamp.isoformat(),
-            ),
-        )
-        self._logger.info("Target %s: state updated", target.id)
-        return TargetSyncResult(
-            target_id=target.id,
-            status=TargetSyncStatus.UPDATED,
-            version=asset.version,
-            change=change,
-            message=f"Updated to version {asset.version}",
-        )
 
     @staticmethod
     def _validate_download_result(

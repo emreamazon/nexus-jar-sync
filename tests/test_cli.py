@@ -11,7 +11,9 @@ from nexus_jar_sync.state import ChangeDecision
 from nexus_jar_sync.sync import SyncSummary, TargetSyncResult, TargetSyncStatus
 
 
-def write_config(tmp_path: Path, *, username: str | None = None, password: str | None = None) -> Path:
+def write_config(
+    tmp_path: Path, *, username_env: str | None = None, password_env: str | None = None
+) -> Path:
     target: dict[str, object] = {
         "id": "example",
         "nexus": {
@@ -22,8 +24,11 @@ def write_config(tmp_path: Path, *, username: str | None = None, password: str |
         },
         "destination": {"directory": str(tmp_path / "destination")},
     }
-    if username is not None:
-        target["auth"] = {"username": username, "password": password}
+    if username_env is not None or password_env is not None:
+        target["auth"] = {
+            "username_env": username_env,
+            "password_env": password_env,
+        }
     path = tmp_path / "config.yaml"
     path.write_text(
         yaml.safe_dump(
@@ -140,16 +145,73 @@ def test_unexpected_errors_propagate_and_resources_close(tmp_path: Path, error: 
     assert service.closed
 
 
-def test_summary_and_errors_do_not_expose_credentials(tmp_path: Path, capsys) -> None:
+def test_summary_and_errors_do_not_expose_resolved_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
     username, password = "private-user", "private-password"
+    monkeypatch.setenv("TEST_NEXUS_USERNAME", username)
+    monkeypatch.setenv("TEST_NEXUS_PASSWORD", password)
     service = FakeService(SyncSummary((result("example", TargetSyncStatus.FAILED),)))
     assert main(
-        ["--config", str(write_config(tmp_path, username=username, password=password))],
+        [
+            "--config",
+            str(
+                write_config(
+                    tmp_path,
+                    username_env="TEST_NEXUS_USERNAME",
+                    password_env="TEST_NEXUS_PASSWORD",
+                )
+            ),
+        ],
         service_factory=lambda logger: service,
     ) == 1
     captured = capsys.readouterr()
     assert username not in captured.out + captured.err
     assert password not in captured.out + captured.err
+    log_text = (tmp_path / "logs" / "sync.log").read_text(encoding="utf-8")
+    assert username not in log_text
+    assert password not in log_text
+
+
+@pytest.mark.parametrize("field", ["username", "password", "user_env"])
+def test_direct_or_unknown_auth_field_exits_two_before_logging_and_service(
+    tmp_path: Path, field: str, capsys
+) -> None:
+    secret = "direct-secret-value"
+    path = write_config(tmp_path)
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw["targets"][0]["auth"] = {field: secret}
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    called = False
+
+    def factory(logger):
+        nonlocal called
+        called = True
+        raise AssertionError
+
+    assert main(["--config", str(path)], service_factory=factory) == 2
+    captured = capsys.readouterr()
+    assert field in captured.err
+    assert secret not in captured.err
+    assert "Traceback" not in captured.err
+    assert not called
+    assert not (tmp_path / "logs").exists()
+
+
+def test_failed_summary_displays_preserved_version(tmp_path: Path, capsys) -> None:
+    failed = TargetSyncResult(
+        target_id="example",
+        status=TargetSyncStatus.FAILED,
+        version="4.2.0",
+        change=ChangeDecision.VERSION_CHANGED,
+        message="sanitized failure",
+    )
+    service = FakeService(SyncSummary((failed,)))
+    assert main(
+        ["--config", str(write_config(tmp_path))],
+        service_factory=lambda logger: service,
+    ) == 1
+    assert "example  FAILED  4.2.0  version_changed" in capsys.readouterr().out
 
 
 def test_console_script_metadata_points_to_main() -> None:

@@ -108,6 +108,7 @@ _DEFAULT_NETWORK: dict[str, Any] = {
     "ca_bundle": None,
 }
 _DEFAULT_AUTH: dict[str, Any] = {"username_env": None, "password_env": None}
+_AUTH_KEYS = frozenset(_DEFAULT_AUTH)
 _DEFAULT_ARTIFACT: dict[str, Any] = {"extension": "jar", "classifier": None}
 _DEFAULT_RETENTION: dict[str, Any] = {"keep_previous_versions": 1}
 _DEFAULT_LOGGING: dict[str, Any] = {
@@ -321,7 +322,17 @@ def _merged_section(
     base: Mapping[str, Any], container: Mapping[str, Any], key: str, context: str
 ) -> dict[str, Any]:
     override = _mapping(container.get(key, {}), f"'{key}' in {context}")
+    if key == "auth":
+        _validate_allowed_keys(override, _AUTH_KEYS, f"'auth' in {context}")
     return {**base, **override}
+
+
+def _validate_allowed_keys(
+    values: Mapping[str, Any], allowed: frozenset[str], context: str
+) -> None:
+    for field_name in values:
+        if field_name not in allowed:
+            raise ConfigError(f"Unknown field '{field_name}' in {context}")
 
 
 def _mapping(value: Any, context: str) -> Mapping[str, Any]:

@@ -308,6 +308,15 @@ def test_operational_failures_stop_downstream_and_return_failed(
     ).run(app_config(tmp_path, target)).results[0]
     assert result.status is TargetSyncStatus.FAILED
     assert "safe" in result.message or "failed" in result.message
+    if stage == "discovery":
+        assert result.version is None
+        assert result.change is None
+    elif stage == "state-load":
+        assert result.version == asset.version
+        assert result.change is None
+    else:
+        assert result.version == asset.version
+        assert result.change is ChangeDecision.FIRST_RUN
     assert store.saves == []
     if stage == "discovery":
         assert len(client_outcomes) == 0
@@ -518,6 +527,8 @@ def test_dry_run_isolates_expected_state_error_but_propagates_programming_error(
         FakeStore(load_failures={"one"}),
     ).run(app_config(tmp_path, target), dry_run=True)
     assert expected.results[0].status is TargetSyncStatus.FAILED
+    assert expected.results[0].version == "2.0"
+    assert expected.results[0].change is None
 
     class BrokenStore(FakeStore):
         def load(self, target_id: str) -> TargetState | None:

@@ -228,6 +228,34 @@ def test_credentials_resolve_and_repr_is_redacted(tmp_path: Path, monkeypatch: p
     assert "very-secret" not in repr(auth)
 
 
+@pytest.mark.parametrize(
+    ("context", "field"),
+    [
+        ("defaults", "username"),
+        ("defaults", "password"),
+        ("target", "username"),
+        ("target", "password"),
+        ("target", "user_name_env"),
+        ("target", "token"),
+    ],
+)
+def test_unknown_authentication_fields_are_rejected_without_exposing_values(
+    tmp_path: Path, context: str, field: str
+) -> None:
+    secret = "must-never-appear"
+    raw: dict[str, object] = {"targets": [target()]}
+    if context == "defaults":
+        raw["defaults"] = {"auth": {field: secret}}
+    else:
+        raw["targets"] = [target(auth={field: secret})]
+    with pytest.raises(ConfigError) as caught:
+        load_config(write_config(tmp_path, raw))
+    message = str(caught.value)
+    assert field in message
+    assert context in message
+    assert secret not in message
+
+
 def test_trailing_slash_is_removed_from_nexus_url(tmp_path: Path) -> None:
     loaded = load_config(write_config(tmp_path, {"targets": [target()]})).targets[0]
     assert loaded.nexus.url == "https://nexus.example.com"
