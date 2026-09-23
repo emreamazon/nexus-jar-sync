@@ -4,6 +4,8 @@
 
 M4/M5 add separately callable streamed downloads with checksum verification, same-directory temporary files and atomic deployment, plus target-specific local artifact retention.
 
+M6/M7 add configurable rotating file logging, bounded fixed-delay retry for transient discovery and download failures, and a one-shot synchronization service. The service processes enabled targets sequentially, isolates expected per-target failures, and saves state only after download and retention succeed.
+
 ## Requirements and setup
 
 Python 3.12 or newer is required.
@@ -43,9 +45,9 @@ Validate configuration and list enabled targets:
 nexus-jar-sync --config config/config.yaml
 ```
 
-The command still performs no network activity and creates no destination, state, or download files. Discovery, downloading, retention, and state are not yet orchestrated by the CLI, and state is not automatically updated after a download.
+The command still performs configuration validation only: it performs no network activity, retry, synchronization, or logging setup and creates no destination, state, log, or download files. The synchronization service is available as a library API but is not yet connected to the CLI.
 
-Retry execution, logging, orchestration, state updates after successful deployments, dry-run behavior, and the full synchronization CLI are planned for later milestones.
+Active CLI synchronization and `--dry-run` belong to M8. Scheduling remains external and is not implemented by this project.
 
 Run the tests with:
 

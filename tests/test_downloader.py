@@ -179,8 +179,9 @@ def test_destination_directory_failure_is_translated_before_request(
         original_mkdir(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "mkdir", fail_destination)
-    with pytest.raises(DownloadError, match="Could not create destination"):
+    with pytest.raises(DownloadError, match="Could not create destination") as caught:
         ArtifactDownloader(session).download(make_asset(), make_target(destination))
+    assert caught.value.retryable is False
     assert not session.calls
 
 
@@ -193,8 +194,9 @@ def test_temporary_file_creation_failure_closes_response(
         "NamedTemporaryFile",
         lambda **kwargs: (_ for _ in ()).throw(OSError("private filesystem detail")),
     )
-    with pytest.raises(DownloadError, match="Could not create temporary"):
+    with pytest.raises(DownloadError, match="Could not create temporary") as caught:
         ArtifactDownloader(FakeSession(response)).download(make_asset(), make_target(tmp_path))
+    assert caught.value.retryable is False
     assert response.closed
     assert not temporary_downloads(tmp_path)
 
@@ -334,10 +336,11 @@ def test_fsync_failure_preserves_existing_file(
     final = tmp_path / "application-1.0.0.jar"
     final.write_bytes(b"existing")
     monkeypatch.setattr(downloader_module.os, "fsync", lambda descriptor: (_ for _ in ()).throw(OSError()))
-    with pytest.raises(DownloadError, match="Could not flush"):
+    with pytest.raises(DownloadError, match="Could not flush") as caught:
         ArtifactDownloader(FakeSession(FakeResponse())).download(
             make_asset(), make_target(tmp_path)
         )
+    assert caught.value.retryable is False
     assert final.read_bytes() == b"existing"
     assert not temporary_downloads(tmp_path)
 
@@ -421,3 +424,59 @@ def test_download_does_not_create_state(tmp_path: Path) -> None:
         make_asset(), make_target(destination)
     )
     assert not state_directory.exists()
+
+
+@pytest.mark.parametrize("error", [requests.Timeout(), requests.ConnectionError()])
+def test_transient_request_failures_are_retryable(tmp_path: Path, error: Exception) -> None:
+    with pytest.raises(DownloadError) as caught:
+        ArtifactDownloader(FakeSession(error)).download(make_asset(), make_target(tmp_path))
+    assert caught.value.retryable is True
+
+
+@pytest.mark.parametrize(
+    ("status", "retryable"),
+    [(408, True), (429, True), (500, True), (503, True), (401, False), (403, False), (400, False), (404, False)],
+)
+def test_http_retry_classification(tmp_path: Path, status: int, retryable: bool) -> None:
+    with pytest.raises(DownloadError) as caught:
+        ArtifactDownloader(FakeSession(FakeResponse(status_code=status))).download(
+            make_asset(), make_target(tmp_path)
+        )
+    assert caught.value.retryable is retryable
+
+
+@pytest.mark.parametrize("failure", ["stream", "length", "checksum"])
+def test_transfer_integrity_failures_are_retryable(tmp_path: Path, failure: str) -> None:
+    if failure == "stream":
+        response = FakeResponse(stream_error=RuntimeError())
+        asset = make_asset()
+    elif failure == "length":
+        response = FakeResponse(headers={"Content-Length": str(len(CONTENT) + 1)})
+        asset = make_asset()
+    else:
+        response = FakeResponse()
+        asset = make_asset(checksum="0" * 64)
+    with pytest.raises(DownloadError) as caught:
+        ArtifactDownloader(FakeSession(response)).download(asset, make_target(tmp_path))
+    assert caught.value.retryable is True
+
+
+def test_unsafe_filename_failure_is_not_retryable(tmp_path: Path) -> None:
+    with pytest.raises(DownloadError) as caught:
+        ArtifactDownloader(FakeSession(FakeResponse())).download(
+            make_asset(filename="../escape.jar"), make_target(tmp_path)
+        )
+    assert caught.value.retryable is False
+
+
+def test_atomic_replacement_failure_is_not_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        downloader_module.os,
+        "replace",
+        lambda source, destination: (_ for _ in ()).throw(OSError()),
+    )
+    with pytest.raises(DownloadError) as caught:
+        ArtifactDownloader(FakeSession(FakeResponse())).download(make_asset(), make_target(tmp_path))
+    assert caught.value.retryable is False

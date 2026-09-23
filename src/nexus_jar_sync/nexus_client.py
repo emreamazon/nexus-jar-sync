@@ -17,6 +17,10 @@ from nexus_jar_sync.config import TargetConfig
 class NexusClientError(Exception):
     """Raised when Nexus discovery fails or returns unusable data."""
 
+    def __init__(self, message: str, *, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+
 
 @dataclass(frozen=True)
 class NexusAsset:
@@ -139,10 +143,12 @@ class NexusClient:
         try:
             response = self._session.get(endpoint, **kwargs)
         except requests.Timeout:
-            raise NexusClientError(f"Nexus request timed out for target '{target.id}'") from None
+            raise NexusClientError(
+                f"Nexus request timed out for target '{target.id}'", retryable=True
+            ) from None
         except requests.ConnectionError:
             raise NexusClientError(
-                f"Could not connect to Nexus server for target '{target.id}'"
+                f"Could not connect to Nexus server for target '{target.id}'", retryable=True
             ) from None
         except requests.RequestException:
             raise NexusClientError(f"Nexus request failed for target '{target.id}'") from None
@@ -155,7 +161,9 @@ class NexusClient:
         if not isinstance(status_code, int) or not 200 <= status_code < 300:
             status = status_code if isinstance(status_code, int) else "unknown"
             raise NexusClientError(
-                f"Nexus returned HTTP {status} for target '{target.id}'"
+                f"Nexus returned HTTP {status} for target '{target.id}'",
+                retryable=isinstance(status_code, int)
+                and (status_code in {408, 429} or 500 <= status_code < 600),
             )
         return response
 

@@ -19,6 +19,10 @@ from nexus_jar_sync.nexus_client import NexusAsset, NexusClientError
 class DownloadError(Exception):
     """Raised when an artifact cannot be safely downloaded and deployed."""
 
+    def __init__(self, message: str, *, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+
 
 @dataclass(frozen=True)
 class DownloadResult:
@@ -74,10 +78,12 @@ class ArtifactDownloader:
                 stream=True,
             )
         except requests.Timeout:
-            raise DownloadError(f"Download timed out for target '{target.id}'") from None
+            raise DownloadError(
+                f"Download timed out for target '{target.id}'", retryable=True
+            ) from None
         except requests.ConnectionError:
             raise DownloadError(
-                f"Could not connect while downloading target '{target.id}'"
+                f"Could not connect while downloading target '{target.id}'", retryable=True
             ) from None
         except requests.RequestException:
             raise DownloadError(f"Download request failed for target '{target.id}'") from None
@@ -107,7 +113,7 @@ class ArtifactDownloader:
                         chunks = iter(response.iter_content(chunk_size=self.CHUNK_SIZE))
                     except Exception:
                         raise DownloadError(
-                            f"Download stream failed for target '{target.id}'"
+                            f"Download stream failed for target '{target.id}'", retryable=True
                         ) from None
                     while True:
                         try:
@@ -116,7 +122,7 @@ class ArtifactDownloader:
                             break
                         except Exception:
                             raise DownloadError(
-                                f"Download stream failed for target '{target.id}'"
+                                f"Download stream failed for target '{target.id}'", retryable=True
                             ) from None
                         if not chunk:
                             continue
@@ -148,12 +154,14 @@ class ArtifactDownloader:
 
             if content_length is not None and bytes_written != content_length:
                 raise DownloadError(
-                    f"Download size does not match Content-Length for target '{target.id}'"
+                    f"Download size does not match Content-Length for target '{target.id}'",
+                    retryable=True,
                 )
             actual_checksum = digest.hexdigest()
             if not hmac.compare_digest(actual_checksum, expected_checksum):
                 raise DownloadError(
-                    f"Downloaded {checksum_algorithm} checksum does not match for target '{target.id}'"
+                    f"Downloaded {checksum_algorithm} checksum does not match for target '{target.id}'",
+                    retryable=True,
                 )
             try:
                 os.replace(temporary_path, final_path)
@@ -219,7 +227,11 @@ class ArtifactDownloader:
             raise DownloadError(f"Download permission denied for target '{target.id}'")
         if not isinstance(status_code, int) or not 200 <= status_code < 300:
             status = status_code if isinstance(status_code, int) else "unknown"
-            raise DownloadError(f"Download returned HTTP {status} for target '{target.id}'")
+            raise DownloadError(
+                f"Download returned HTTP {status} for target '{target.id}'",
+                retryable=isinstance(status_code, int)
+                and (status_code in {408, 429} or 500 <= status_code < 600),
+            )
 
     @staticmethod
     def _content_length(response: Any, target: TargetConfig) -> int | None:

@@ -166,8 +166,9 @@ def test_pagination_preserves_search_parameters_and_selects_latest() -> None:
 
 def test_repeated_continuation_token_fails() -> None:
     session = FakeSession(page(token="again"), page(token="again"))
-    with pytest.raises(NexusClientError, match="repeated continuation token"):
+    with pytest.raises(NexusClientError, match="repeated continuation token") as caught:
         NexusClient(session).get_latest_asset(make_target())
+    assert caught.value.retryable is False
 
 
 def test_main_jar_excludes_classified_jars() -> None:
@@ -368,8 +369,9 @@ def test_download_url_credentials_are_not_exposed_in_error() -> None:
 def test_conflicting_duplicate_latest_assets_fail() -> None:
     first = asset_item("2.0")
     second = asset_item("2.0", download_url="https://nexus.example.com/other/application.jar")
-    with pytest.raises(NexusClientError, match="Conflicting assets"):
+    with pytest.raises(NexusClientError, match="Conflicting assets") as caught:
         NexusClient(FakeSession(page(first, second))).get_latest_asset(make_target())
+    assert caught.value.retryable is False
 
 
 def test_credentials_never_appear_in_errors_or_client_repr() -> None:
@@ -381,3 +383,37 @@ def test_credentials_never_appear_in_errors_or_client_repr() -> None:
     combined = f"{error.value!r} {client!r}"
     assert username not in combined
     assert password not in combined
+
+
+@pytest.mark.parametrize("error", [requests.Timeout(), requests.ConnectionError()])
+def test_transient_request_failures_are_retryable(error: Exception) -> None:
+    with pytest.raises(NexusClientError) as caught:
+        NexusClient(FakeSession(error)).get_latest_asset(make_target())
+    assert caught.value.retryable is True
+
+
+@pytest.mark.parametrize(
+    ("status", "retryable"),
+    [(408, True), (429, True), (500, True), (503, True), (401, False), (403, False), (400, False), (404, False)],
+)
+def test_http_retry_classification(status: int, retryable: bool) -> None:
+    with pytest.raises(NexusClientError) as caught:
+        NexusClient(FakeSession(FakeResponse({}, status))).get_latest_asset(make_target())
+    assert caught.value.retryable is retryable
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        FakeResponse(None, json_error=ValueError()),
+        FakeResponse({"items": {}}),
+        page(token=123),
+        page(asset_item(classifier="sources")),
+        page(asset_item("not a version")),
+        page(asset_item(checksum={})),
+    ],
+)
+def test_schema_and_selection_failures_are_not_retryable(response: FakeResponse) -> None:
+    with pytest.raises(NexusClientError) as caught:
+        NexusClient(FakeSession(response)).get_latest_asset(make_target())
+    assert caught.value.retryable is False

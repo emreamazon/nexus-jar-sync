@@ -37,6 +37,69 @@ def test_valid_single_target_uses_built_in_defaults(tmp_path: Path) -> None:
     assert loaded.artifact.extension == "jar"
     assert loaded.artifact.classifier is None
     assert loaded.retention.keep_previous_versions == 1
+    assert config.logging.level == "INFO"
+    assert config.logging.file == Path("logs/nexus-jar-sync.log")
+    assert config.logging.max_file_size_mb == 5
+    assert config.logging.backup_count == 3
+    assert config.state.directory == Path("data/state")
+
+
+def test_explicit_logging_and_state_configuration(tmp_path: Path) -> None:
+    log_file = tmp_path / "not-created" / "sync.log"
+    state_directory = tmp_path / "state"
+    raw = {
+        "logging": {
+            "level": "debug",
+            "file": str(log_file),
+            "max_file_size_mb": 1.5,
+            "backup_count": 2,
+        },
+        "state": {"directory": str(state_directory)},
+        "targets": [target()],
+    }
+    config = load_config(write_config(tmp_path, raw))
+    assert config.logging.level == "DEBUG"
+    assert config.logging.file == log_file
+    assert config.logging.max_file_size_mb == 1.5
+    assert config.logging.backup_count == 2
+    assert config.state.directory == state_directory
+    assert not log_file.parent.exists()
+    assert not state_directory.exists()
+
+
+@pytest.mark.parametrize("level", ["TRACE", "", 1])
+def test_invalid_logging_level_fails(tmp_path: Path, level: object) -> None:
+    with pytest.raises(ConfigError, match="logging.level"):
+        load_config(write_config(tmp_path, {"logging": {"level": level}, "targets": [target()]}))
+
+
+def test_empty_logging_path_fails(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="logging.file"):
+        load_config(write_config(tmp_path, {"logging": {"file": "  "}, "targets": [target()]}))
+
+
+@pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf"), True])
+def test_invalid_logging_max_size_fails(tmp_path: Path, value: object) -> None:
+    with pytest.raises(ConfigError, match="logging.max_file_size_mb"):
+        load_config(
+            write_config(
+                tmp_path,
+                {"logging": {"max_file_size_mb": value}, "targets": [target()]},
+            )
+        )
+
+
+@pytest.mark.parametrize("value", [-1, 1.5, True])
+def test_invalid_logging_backup_count_fails(tmp_path: Path, value: object) -> None:
+    with pytest.raises(ConfigError, match="logging.backup_count"):
+        load_config(
+            write_config(tmp_path, {"logging": {"backup_count": value}, "targets": [target()]})
+        )
+
+
+def test_empty_state_directory_fails(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="state.directory"):
+        load_config(write_config(tmp_path, {"state": {"directory": ""}, "targets": [target()]}))
 
 
 def test_valid_multi_target_configuration(tmp_path: Path) -> None:
@@ -188,3 +251,6 @@ def test_example_configuration_parses(monkeypatch: pytest.MonkeyPatch) -> None:
     config = load_config(path)
     assert len(config.targets) == 2
     assert len(config.enabled_targets) == 1
+    assert config.logging.level == "INFO"
+    assert config.logging.file == Path("logs/nexus-jar-sync.log")
+    assert config.state.directory == Path("data/state")

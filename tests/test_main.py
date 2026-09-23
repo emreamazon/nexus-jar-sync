@@ -9,6 +9,7 @@ import yaml
 from nexus_jar_sync.downloader import ArtifactDownloader
 from nexus_jar_sync.lifecycle import ArtifactLifecycleManager
 from nexus_jar_sync.main import main
+from nexus_jar_sync.sync import SyncService
 
 
 def test_cli_only_validates_configuration_without_network_or_filesystem_side_effects(
@@ -16,10 +17,13 @@ def test_cli_only_validates_configuration_without_network_or_filesystem_side_eff
 ) -> None:
     destination = tmp_path / "destination"
     state_directory = tmp_path / "state"
+    log_directory = tmp_path / "logs"
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         yaml.safe_dump(
             {
+                "logging": {"file": str(log_directory / "sync.log")},
+                "state": {"directory": str(state_directory)},
                 "targets": [
                     {
                         "id": "example",
@@ -51,10 +55,20 @@ def test_cli_only_validates_configuration_without_network_or_filesystem_side_eff
         "apply_retention",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("CLI attempted retention")),
     )
+    monkeypatch.setattr(
+        SyncService,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("CLI attempted sync")),
+    )
+    monkeypatch.setattr(
+        "time.sleep",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("CLI attempted sleep")),
+    )
     unrelated_file = tmp_path / "unrelated.jar"
     unrelated_file.write_bytes(b"keep")
     assert main(["--config", str(config_path)]) == 0
     assert "Enabled targets: 1" in capsys.readouterr().out
     assert not destination.exists()
     assert not state_directory.exists()
+    assert not log_directory.exists()
     assert unrelated_file.read_bytes() == b"keep"

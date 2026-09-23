@@ -25,6 +25,19 @@ class NetworkConfig:
     ca_bundle: Path | None = None
 
 
+@dataclass(frozen=True)
+class LoggingConfig:
+    level: str = "INFO"
+    file: Path = Path("logs/nexus-jar-sync.log")
+    max_file_size_mb: float = 5
+    backup_count: int = 3
+
+
+@dataclass(frozen=True)
+class StateConfig:
+    directory: Path = Path("data/state")
+
+
 @dataclass(frozen=True, repr=False)
 class AuthConfig:
     username_env: str | None = None
@@ -79,6 +92,8 @@ class TargetConfig:
 @dataclass(frozen=True)
 class AppConfig:
     targets: tuple[TargetConfig, ...]
+    logging: LoggingConfig = LoggingConfig()
+    state: StateConfig = StateConfig()
 
     @property
     def enabled_targets(self) -> tuple[TargetConfig, ...]:
@@ -95,6 +110,13 @@ _DEFAULT_NETWORK: dict[str, Any] = {
 _DEFAULT_AUTH: dict[str, Any] = {"username_env": None, "password_env": None}
 _DEFAULT_ARTIFACT: dict[str, Any] = {"extension": "jar", "classifier": None}
 _DEFAULT_RETENTION: dict[str, Any] = {"keep_previous_versions": 1}
+_DEFAULT_LOGGING: dict[str, Any] = {
+    "level": "INFO",
+    "file": "logs/nexus-jar-sync.log",
+    "max_file_size_mb": 5,
+    "backup_count": 3,
+}
+_DEFAULT_STATE: dict[str, Any] = {"directory": "data/state"}
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -125,6 +147,8 @@ def load_config(path: str | Path) -> AppConfig:
     default_auth = _merged_section(_DEFAULT_AUTH, defaults, "auth", "defaults")
     default_artifact = _merged_section(_DEFAULT_ARTIFACT, defaults, "artifact", "defaults")
     default_retention = _merged_section(_DEFAULT_RETENTION, defaults, "target", "defaults")
+    logging_config = _parse_logging(_merged_section(_DEFAULT_LOGGING, root, "logging", "root"))
+    state_config = _parse_state(_merged_section(_DEFAULT_STATE, root, "state", "root"))
 
     targets: list[TargetConfig] = []
     seen_ids: set[str] = set()
@@ -141,7 +165,47 @@ def load_config(path: str | Path) -> AppConfig:
             raise ConfigError(f"Duplicate target id: '{target.id}'")
         seen_ids.add(target.id)
         targets.append(target)
-    return AppConfig(targets=tuple(targets))
+    return AppConfig(
+        targets=tuple(targets),
+        logging=logging_config,
+        state=state_config,
+    )
+
+
+def _parse_logging(values: Mapping[str, Any]) -> LoggingConfig:
+    level = values.get("level")
+    if not isinstance(level, str) or level.upper() not in {
+        "DEBUG",
+        "INFO",
+        "WARNING",
+        "ERROR",
+        "CRITICAL",
+    }:
+        raise ConfigError(
+            "'logging.level' must be DEBUG, INFO, WARNING, ERROR, or CRITICAL"
+        )
+    file_value = values.get("file")
+    if not isinstance(file_value, str) or not file_value.strip():
+        raise ConfigError("'logging.file' must be a non-empty path")
+    max_size = values.get("max_file_size_mb")
+    if not _is_finite_real(max_size) or max_size <= 0:
+        raise ConfigError("'logging.max_file_size_mb' must be a finite number greater than 0")
+    backup_count = values.get("backup_count")
+    if not _is_int(backup_count) or backup_count < 0:
+        raise ConfigError("'logging.backup_count' must be an integer of at least 0")
+    return LoggingConfig(
+        level=level.upper(),
+        file=Path(file_value.strip()),
+        max_file_size_mb=max_size,
+        backup_count=backup_count,
+    )
+
+
+def _parse_state(values: Mapping[str, Any]) -> StateConfig:
+    directory = values.get("directory")
+    if not isinstance(directory, str) or not directory.strip():
+        raise ConfigError("'state.directory' must be a non-empty path")
+    return StateConfig(directory=Path(directory.strip()))
 
 
 def _parse_target(
