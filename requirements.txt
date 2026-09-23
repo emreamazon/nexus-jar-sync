@@ -1,0 +1,4 @@
+PyYAML>=6.0,<7
+requests>=2.31,<3
+packaging>=24,<26
+pytest>=8,<9

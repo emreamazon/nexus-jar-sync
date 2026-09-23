@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nexus-jar-sync"
+version = "0.1.0"
+description = "Configuration-driven synchronization of JAR artifacts from Nexus repositories."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "PyYAML>=6.0,<7",
+    "requests>=2.31,<3",
+    "packaging>=24,<26",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<9"]
+
+[project.scripts]
+nexus-jar-sync = "nexus_jar_sync.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

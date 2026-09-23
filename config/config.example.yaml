@@ -1,0 +1,50 @@
+# Copy this file to config/config.yaml and replace the placeholder values.
+# Credentials are read from environment variables and must never be placed here.
+defaults:
+  network:
+    timeout_seconds: 30
+    retries: 3
+    retry_delay_seconds: 5
+    verify_tls: true
+    ca_bundle: null
+
+  auth:
+    username_env: "NEXUS_USERNAME"
+    password_env: "NEXUS_PASSWORD"
+
+  artifact:
+    extension: "jar"
+    classifier: null
+
+  target:
+    keep_previous_versions: 1
+
+targets:
+  - id: "example-application"
+    enabled: true
+    nexus:
+      url: "https://nexus.example.com/"
+      repository: "maven-releases"
+      group_id: "com.example.project"
+      artifact_id: "example-application"
+    destination:
+      directory: "C:/JarFiles/example-application"
+
+  - id: "example-library"
+    enabled: false
+    nexus:
+      url: "https://another-nexus.example.com"
+      repository: "releases"
+      group_id: "com.example.library"
+      artifact_id: "example-library"
+    auth:
+      username_env: "LIBRARY_NEXUS_USERNAME"
+      password_env: "LIBRARY_NEXUS_PASSWORD"
+    artifact:
+      classifier: "all"
+    network:
+      timeout_seconds: 10
+    destination:
+      directory: "/opt/jars/example-library"
+    target:
+      keep_previous_versions: 2
