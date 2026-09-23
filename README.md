@@ -2,6 +2,8 @@
 
 `nexus-jar-sync` is intended to keep configured JAR artifacts synchronized from one or more Sonatype Nexus repositories. M0/M1 provide the project foundation and validated, configuration-driven multi-target setup. M2/M3 add reusable Nexus asset discovery with pagination and exact main/classifier filtering, plus independent per-target state storage and change detection.
 
+M4/M5 add separately callable streamed downloads with checksum verification, same-directory temporary files and atomic deployment, plus target-specific local artifact retention.
+
 ## Requirements and setup
 
 Python 3.12 or newer is required.
@@ -41,9 +43,9 @@ Validate configuration and list enabled targets:
 nexus-jar-sync --config config/config.yaml
 ```
 
-The command still performs no network activity and creates no destination, state, or download files. The Nexus client and state APIs are not yet orchestrated by the CLI.
+The command still performs no network activity and creates no destination, state, or download files. Discovery, downloading, retention, and state are not yet orchestrated by the CLI, and state is not automatically updated after a download.
 
-Downloading, downloaded-file checksum verification, state updates after successful downloads, retry execution, retention, and the full synchronization CLI are planned for later milestones.
+Retry execution, logging, orchestration, state updates after successful deployments, dry-run behavior, and the full synchronization CLI are planned for later milestones.
 
 Run the tests with:
 

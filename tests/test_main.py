@@ -6,6 +6,8 @@ import pytest
 import requests
 import yaml
 
+from nexus_jar_sync.downloader import ArtifactDownloader
+from nexus_jar_sync.lifecycle import ArtifactLifecycleManager
 from nexus_jar_sync.main import main
 
 
@@ -39,7 +41,20 @@ def test_cli_only_validates_configuration_without_network_or_filesystem_side_eff
         raise AssertionError("CLI attempted network access")
 
     monkeypatch.setattr(requests.sessions.Session, "request", reject_network)
+    monkeypatch.setattr(
+        ArtifactDownloader,
+        "download",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("CLI attempted download")),
+    )
+    monkeypatch.setattr(
+        ArtifactLifecycleManager,
+        "apply_retention",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("CLI attempted retention")),
+    )
+    unrelated_file = tmp_path / "unrelated.jar"
+    unrelated_file.write_bytes(b"keep")
     assert main(["--config", str(config_path)]) == 0
     assert "Enabled targets: 1" in capsys.readouterr().out
     assert not destination.exists()
     assert not state_directory.exists()
+    assert unrelated_file.read_bytes() == b"keep"
