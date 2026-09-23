@@ -285,8 +285,21 @@ def test_http_errors_are_translated_and_response_closed(
 def test_stream_failure_preserves_final_and_removes_temp(tmp_path: Path) -> None:
     final = tmp_path / "application-1.0.0.jar"
     final.write_bytes(b"existing")
-    response = FakeResponse([b"partial"], stream_error=RuntimeError("server secret"))
+    response = FakeResponse(
+        [b"partial"], stream_error=requests.ConnectionError("server secret")
+    )
     with pytest.raises(DownloadError, match="stream failed"):
+        ArtifactDownloader(FakeSession(response)).download(make_asset(), make_target(tmp_path))
+    assert final.read_bytes() == b"existing"
+    assert not temporary_downloads(tmp_path)
+    assert response.closed
+
+
+def test_programming_stream_error_propagates_with_cleanup(tmp_path: Path) -> None:
+    final = tmp_path / "application-1.0.0.jar"
+    final.write_bytes(b"existing")
+    response = FakeResponse([b"partial"], stream_error=RuntimeError("programming defect"))
+    with pytest.raises(RuntimeError, match="programming defect"):
         ArtifactDownloader(FakeSession(response)).download(make_asset(), make_target(tmp_path))
     assert final.read_bytes() == b"existing"
     assert not temporary_downloads(tmp_path)
@@ -448,7 +461,7 @@ def test_http_retry_classification(tmp_path: Path, status: int, retryable: bool)
 @pytest.mark.parametrize("failure", ["stream", "length", "checksum"])
 def test_transfer_integrity_failures_are_retryable(tmp_path: Path, failure: str) -> None:
     if failure == "stream":
-        response = FakeResponse(stream_error=RuntimeError())
+        response = FakeResponse(stream_error=requests.exceptions.ChunkedEncodingError())
         asset = make_asset()
     elif failure == "length":
         response = FakeResponse(headers={"Content-Length": str(len(CONTENT) + 1)})

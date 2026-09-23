@@ -396,6 +396,26 @@ def test_unexpected_programming_error_is_not_swallowed(tmp_path: Path) -> None:
         ).run(app_config(tmp_path, target))
 
 
+def test_downloader_programming_error_is_not_retried_or_swallowed(tmp_path: Path) -> None:
+    target = make_target("one", tmp_path, retries=3)
+    downloader = FakeDownloader({"one": [RuntimeError("stream programming defect")]})
+    sleeps: list[float] = []
+    store = FakeStore()
+    lifecycle = FakeLifecycle()
+    with pytest.raises(RuntimeError, match="stream programming defect"):
+        make_service(
+            FakeClient({"one": [make_asset()]}),
+            downloader,
+            lifecycle,
+            store,
+            sleeps=sleeps,
+        ).run(app_config(tmp_path, target))
+    assert downloader.calls == ["one"]
+    assert sleeps == []
+    assert lifecycle.calls == []
+    assert store.saves == []
+
+
 def test_credentials_do_not_appear_in_failed_result_or_logs(tmp_path: Path) -> None:
     username = "private-user"
     password = "private-password"

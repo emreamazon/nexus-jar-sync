@@ -111,7 +111,7 @@ class ArtifactDownloader:
                 with temporary_file:
                     try:
                         chunks = iter(response.iter_content(chunk_size=self.CHUNK_SIZE))
-                    except Exception:
+                    except requests.RequestException:
                         raise DownloadError(
                             f"Download stream failed for target '{target.id}'", retryable=True
                         ) from None
@@ -120,7 +120,7 @@ class ArtifactDownloader:
                             chunk = next(chunks)
                         except StopIteration:
                             break
-                        except Exception:
+                        except requests.RequestException:
                             raise DownloadError(
                                 f"Download stream failed for target '{target.id}'", retryable=True
                             ) from None

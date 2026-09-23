@@ -5,7 +5,11 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from nexus_jar_sync.config import LoggingConfig
-from nexus_jar_sync.logging_config import LOGGER_NAME, configure_logging
+from nexus_jar_sync.logging_config import (
+    BoundedRotatingFileHandler,
+    LOGGER_NAME,
+    configure_logging,
+)
 
 
 def close_managed_handlers() -> None:
@@ -87,3 +91,68 @@ def test_root_handlers_unchanged_and_credentials_not_logged(tmp_path: Path) -> N
     finally:
         close_managed_handlers()
         root.removeHandler(unrelated)
+
+
+def test_zero_backup_rollover_bounds_active_file_without_archive(tmp_path: Path) -> None:
+    log_file = tmp_path / "sync.log"
+    threshold_bytes = 80
+    record_text = "x" * 50
+    config = LoggingConfig(
+        file=log_file,
+        max_file_size_mb=threshold_bytes / (1024 * 1024),
+        backup_count=0,
+    )
+    try:
+        logger = configure_logging(config)
+        for index in range(8):
+            logger.info("record-%d %s", index, record_text)
+        for handler in logger.handlers:
+            handler.flush()
+        assert log_file.exists()
+        assert not Path(f"{log_file}.1").exists()
+        assert 0 < log_file.stat().st_size <= threshold_bytes + len(record_text) + 100
+        assert "record-7" in log_file.read_text(encoding="utf-8")
+    finally:
+        close_managed_handlers()
+
+
+def test_positive_backup_rotation_still_creates_archive(tmp_path: Path) -> None:
+    log_file = tmp_path / "sync.log"
+    config = LoggingConfig(
+        file=log_file,
+        max_file_size_mb=80 / (1024 * 1024),
+        backup_count=1,
+    )
+    try:
+        logger = configure_logging(config)
+        for index in range(4):
+            logger.info("record-%d %s", index, "x" * 50)
+        for handler in logger.handlers:
+            handler.flush()
+        assert Path(f"{log_file}.1").exists()
+    finally:
+        close_managed_handlers()
+
+
+def test_reconfiguration_closes_and_replaces_managed_handler(tmp_path: Path) -> None:
+    config = LoggingConfig(file=tmp_path / "sync.log")
+    try:
+        logger = configure_logging(config)
+        original = next(
+            handler
+            for handler in logger.handlers
+            if isinstance(handler, BoundedRotatingFileHandler)
+        )
+        replacement_logger = configure_logging(config)
+        replacement = next(
+            handler
+            for handler in replacement_logger.handlers
+            if isinstance(handler, BoundedRotatingFileHandler)
+        )
+        assert replacement is not original
+        assert original.stream is None
+        replacement_logger.info("logging continues after reconfiguration")
+        replacement.flush()
+        assert "logging continues" in config.file.read_text(encoding="utf-8")
+    finally:
+        close_managed_handlers()
