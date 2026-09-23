@@ -151,6 +151,60 @@ def test_unparseable_versions_are_retained(tmp_path: Path) -> None:
     assert files["application-release-x.jar"].exists()
 
 
+def test_main_target_retains_parseable_classifier_like_versions(tmp_path: Path) -> None:
+    files = create_files(
+        tmp_path,
+        "application-3.0.jar",
+        "application-1.0.jar",
+        "application-1.0-1.jar",
+        "application-1.0-rc1.jar",
+        "application-1.0-post1.jar",
+    )
+    removed = ArtifactLifecycleManager().apply_retention(
+        make_target(tmp_path, keep=0), files["application-3.0.jar"]
+    )
+    assert {path.name for path in removed} == {"application-1.0.jar"}
+    for name in (
+        "application-1.0-1.jar",
+        "application-1.0-rc1.jar",
+        "application-1.0-post1.jar",
+    ):
+        assert files[name].exists()
+
+
+@pytest.mark.parametrize(
+    "old_version",
+    ["1.0", "1.0.0", "1.0rc1", "1.0.post1", "1.0+build"],
+)
+def test_main_target_still_deletes_canonical_old_versions(
+    tmp_path: Path, old_version: str
+) -> None:
+    files = create_files(
+        tmp_path,
+        f"application-{old_version}.jar",
+        "application-3.0.jar",
+    )
+    removed = ArtifactLifecycleManager().apply_retention(
+        make_target(tmp_path, keep=0), files["application-3.0.jar"]
+    )
+    assert removed == (files[f"application-{old_version}.jar"],)
+    assert not files[f"application-{old_version}.jar"].exists()
+
+
+def test_explicit_classifier_can_manage_noncanonical_version_spelling(tmp_path: Path) -> None:
+    files = create_files(
+        tmp_path,
+        "application-1.0-1-all.jar",
+        "application-3.0-all.jar",
+    )
+    removed = ArtifactLifecycleManager().apply_retention(
+        make_target(tmp_path, keep=0, classifier="all"),
+        files["application-3.0-all.jar"],
+    )
+    assert removed == (files["application-1.0-1-all.jar"],)
+    assert not files["application-1.0-1-all.jar"].exists()
+
+
 def test_normalized_equivalent_versions_are_retained_conservatively(tmp_path: Path) -> None:
     files = create_files(
         tmp_path,

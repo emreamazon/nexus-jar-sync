@@ -57,6 +57,12 @@ class ArtifactLifecycleManager:
                 parsed_version = Version(raw_version)
             except InvalidVersion:
                 continue
+            # A non-canonical spelling on a main-artifact target may actually be
+            # a version plus classifier (for example, "1.0-1"). Keep it rather
+            # than risk deleting a classified JAR. Explicit classifiers are
+            # unambiguous because their exact suffix is part of the pattern.
+            if target.artifact.classifier is None and str(parsed_version) != raw_version:
+                continue
             candidates.append((entry, raw_version, parsed_version))
             versions[parsed_version].add(raw_version)
 
