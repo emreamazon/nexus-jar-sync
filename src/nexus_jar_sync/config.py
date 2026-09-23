@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
+from numbers import Real
 import os
 from pathlib import Path
 from typing import Any, Mapping
@@ -200,12 +202,17 @@ def _parse_network(values: Mapping[str, Any], target_id: str) -> NetworkConfig:
     retry_delay = values.get("retry_delay_seconds")
     verify_tls = values.get("verify_tls")
     ca_bundle = values.get("ca_bundle")
-    if not _is_number(timeout) or timeout <= 0:
-        raise ConfigError(f"'timeout_seconds' must be greater than 0 for target '{target_id}'")
+    if not _is_finite_real(timeout) or timeout <= 0:
+        raise ConfigError(
+            f"'timeout_seconds' must be a finite number greater than 0 for target '{target_id}'"
+        )
     if not _is_int(retries) or retries < 0:
         raise ConfigError(f"'retries' must be an integer of at least 0 for target '{target_id}'")
-    if not _is_number(retry_delay) or retry_delay < 0:
-        raise ConfigError(f"'retry_delay_seconds' must be at least 0 for target '{target_id}'")
+    if not _is_finite_real(retry_delay) or retry_delay < 0:
+        raise ConfigError(
+            f"'retry_delay_seconds' must be a finite number greater than or equal to 0 "
+            f"for target '{target_id}'"
+        )
     if not isinstance(verify_tls, bool):
         raise ConfigError(f"'verify_tls' must be a boolean for target '{target_id}'")
     if ca_bundle is not None and (not isinstance(ca_bundle, str) or not ca_bundle.strip()):
@@ -287,5 +294,5 @@ def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+def _is_finite_real(value: Any) -> bool:
+    return isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(value)

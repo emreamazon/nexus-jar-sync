@@ -101,6 +101,33 @@ def test_invalid_network_values_fail(tmp_path: Path, key: str, value: object) ->
         load_config(write_config(tmp_path, {"targets": [target(network={key: value})]}))
 
 
+@pytest.mark.parametrize("field", ["timeout_seconds", "retry_delay_seconds"])
+@pytest.mark.parametrize("yaml_value", [".nan", ".inf", "-.inf"])
+def test_non_finite_network_values_fail(
+    tmp_path: Path, field: str, yaml_value: str
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        f"""
+targets:
+  - id: one
+    nexus:
+      url: https://nexus.example.com
+      repository: releases
+      group_id: com.example
+      artifact_id: application
+    destination:
+      directory: output
+    network:
+      {field}: {yaml_value}
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match=field):
+        load_config(path)
+
+
 @pytest.mark.parametrize("value", [-1, 1.5, True])
 def test_invalid_retention_fails(tmp_path: Path, value: object) -> None:
     with pytest.raises(ConfigError, match="keep_previous_versions"):
