@@ -40,6 +40,25 @@ def test_manifest_is_sorted_and_contains_correct_sha256(tmp_path: Path) -> None:
     verifier.verify_manifest(tmp_path)
 
 
+def test_only_root_manifest_is_excluded_during_generation(tmp_path: Path) -> None:
+    nested = write(tmp_path, f"extra/{verifier.MANIFEST_NAME}", b"nested")
+    manifest = verifier.write_manifest(tmp_path)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    paths = [entry["path"] for entry in payload["files"]]
+    assert f"extra/{verifier.MANIFEST_NAME}" in paths
+    assert verifier.MANIFEST_NAME not in paths
+    assert nested.is_file()
+    verifier.verify_manifest(tmp_path)
+
+
+def test_nested_manifest_name_added_after_generation_is_unexpected(tmp_path: Path) -> None:
+    write(tmp_path, "content.txt")
+    verifier.write_manifest(tmp_path)
+    write(tmp_path, f"extra/{verifier.MANIFEST_NAME}", b"unexpected")
+    with pytest.raises(verifier.ManifestError, match="Unexpected distributed file"):
+        verifier.verify_manifest(tmp_path)
+
+
 @pytest.mark.parametrize("failure", ["modified", "missing", "unexpected"])
 def test_manifest_detects_bundle_content_changes(tmp_path: Path, failure: str) -> None:
     file_path = write(tmp_path, "content.txt", b"original")
@@ -202,7 +221,7 @@ def test_builder_rejects_broad_outputs_and_dirty_checkout(
 ) -> None:
     with pytest.raises(builder.BundleBuildError, match="broad"):
         builder.validate_output_directory(Path(tmp_path.anchor), ROOT)
-    with pytest.raises(builder.BundleBuildError, match="broad"):
+    with pytest.raises(builder.BundleBuildError, match="outside"):
         builder.validate_output_directory(ROOT, ROOT)
     source = tmp_path / "source"
     source.mkdir()
@@ -210,6 +229,26 @@ def test_builder_rejects_broad_outputs_and_dirty_checkout(
     monkeypatch.setattr(builder, "_run", lambda *args, **kwargs: " M tracked.txt")
     with pytest.raises(builder.BundleBuildError, match="not clean"):
         builder.ensure_clean_checkout(source)
+
+
+def test_builder_output_must_be_outside_source_checkout(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    direct_child = source / "bundle-output"
+    deep_descendant = source / "generated" / "offline" / "bundle-output"
+
+    for rejected in (source, direct_child, deep_descendant):
+        with pytest.raises(builder.BundleBuildError, match="outside the source checkout"):
+            builder.validate_output_directory(rejected, source)
+        if rejected != source:
+            assert not rejected.exists()
+
+    sibling = tmp_path / "bundle-output"
+    similarly_prefixed_sibling = tmp_path / "source-backup" / "bundle-output"
+    assert builder.validate_output_directory(sibling, source) == sibling.resolve()
+    assert builder.validate_output_directory(similarly_prefixed_sibling, source) == (
+        similarly_prefixed_sibling.resolve()
+    )
 
 
 def test_offline_installers_are_network_closed_and_non_mutating() -> None:

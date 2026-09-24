@@ -47,13 +47,15 @@ def distributed_files(root: Path) -> dict[str, Path]:
     for candidate in resolved_root.rglob("*"):
         if candidate.is_symlink():
             raise ManifestError(f"Symbolic links are not allowed: {candidate.name}")
-        if not candidate.is_file() or candidate.name == MANIFEST_NAME:
+        if not candidate.is_file():
             continue
         resolved = candidate.resolve(strict=True)
         try:
             relative = resolved.relative_to(resolved_root).as_posix()
         except ValueError:
             raise ManifestError("Distributed file escapes the bundle root") from None
+        if relative == MANIFEST_NAME:
+            continue
         _safe_relative_path(relative)
         files[relative] = resolved
     return files

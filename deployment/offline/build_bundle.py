@@ -71,7 +71,13 @@ def project_details(source_root: Path) -> tuple[str, tuple[str, ...]]:
 def validate_output_directory(output_directory: Path, source_root: Path) -> Path:
     output = output_directory.resolve(strict=False)
     source = source_root.resolve(strict=True)
-    if output == source or output == Path(output.anchor) or output.parent == output:
+    try:
+        output.relative_to(source)
+    except ValueError:
+        pass
+    else:
+        raise BundleBuildError("Output directory must be outside the source checkout")
+    if output == Path(output.anchor) or output.parent == output:
         raise BundleBuildError("Output directory is too broad or ambiguous")
     output.mkdir(parents=True, exist_ok=True)
     if not output.is_dir():
