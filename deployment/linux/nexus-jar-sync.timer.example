@@ -1,0 +1,12 @@
+# TEMPLATE: review the interval before installation.
+[Unit]
+Description=Run nexus-jar-sync periodically
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+Unit=nexus-jar-sync.service
+
+[Install]
+WantedBy=timers.target

@@ -4,7 +4,7 @@
 
 M4/M5 add separately callable streamed downloads with checksum verification, same-directory temporary files and atomic deployment, plus target-specific local artifact retention.
 
-M6/M7 add configurable rotating file logging, bounded fixed-delay retry for transient discovery and download failures, and a one-shot synchronization service. M8/M9 connect that service to the CLI, including a read-only dry-run mode.
+M6/M7 add configurable rotating file logging, bounded fixed-delay retry for transient discovery and download failures, and a one-shot synchronization service. M8/M9 connect that service to the CLI, including a read-only dry-run mode. M10 supplies operating-system scheduling examples while keeping the application one-shot.
 
 ## Requirements and setup
 
@@ -57,7 +57,16 @@ Dry-run reads Nexus metadata and existing state, and still performs bounded disc
 
 Both modes print a deterministic per-target summary. Exit code `0` means all enabled targets completed successfully (including targets that would update during a dry run), `1` means at least one target failed, and `2` means configuration loading or logging initialization failed. Unexpected programming errors and interrupts are not hidden.
 
-Active one-shot operation is implemented. Scheduling remains external and is planned for M10.
+## Headless scheduling
+
+The application always performs one synchronization pass and exits. Scheduling frequency belongs to the operating system; no polling loop or scheduler runs inside Python.
+
+- [Windows Task Scheduler instructions](deployment/windows/README.md)
+- [Linux systemd instructions](deployment/linux/README.md)
+
+Run one manual dry-run and one manual active run as the intended scheduler account before installation. That account must be able to read its configured credential environment variables and access Nexus, configuration, destinations, state, logs, and any CA bundle. The supplied examples set an explicit working directory and prevent overlapping invocations.
+
+Portable/offline deployment packaging is deferred to M11.
 
 Run the tests with:
 

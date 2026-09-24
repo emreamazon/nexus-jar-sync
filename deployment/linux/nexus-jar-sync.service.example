@@ -1,0 +1,15 @@
+# TEMPLATE: review all paths and the service account before installation.
+[Unit]
+Description=Synchronize configured JAR artifacts from Nexus
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=nexus-jar-sync
+Group=nexus-jar-sync
+WorkingDirectory=/opt/nexus-jar-sync
+EnvironmentFile=/etc/nexus-jar-sync/credentials.env
+ExecStart=/opt/nexus-jar-sync/.venv/bin/python -m nexus_jar_sync.main --config /etc/nexus-jar-sync/config.yaml
+NoNewPrivileges=true
+PrivateTmp=true
