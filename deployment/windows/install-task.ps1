@@ -29,6 +29,14 @@ $ErrorActionPreference = 'Stop'
 if ([string]::IsNullOrWhiteSpace($TaskName)) {
     throw 'TaskName must not be empty.'
 }
+if ($TaskName.IndexOfAny([char[]]'*?[]/\') -ge 0) {
+    throw 'TaskName must not contain wildcard characters, forward slashes, or backslashes.'
+}
+if ($null -ne ($TaskName.ToCharArray() | Where-Object { [char]::IsControl($_) } | Select-Object -First 1)) {
+    throw 'TaskName must not contain control characters.'
+}
+
+$TaskPath = '\'
 
 function Resolve-RequiredPath {
     param(
@@ -52,7 +60,7 @@ $resolvedProject = Resolve-RequiredPath -LiteralPath $ProjectDirectory -Descript
 $resolvedConfig = Resolve-RequiredPath -LiteralPath $ConfigPath -Description 'ConfigPath' -PathType Leaf
 $resolvedPython = Resolve-RequiredPath -LiteralPath $PythonExecutable -Description 'PythonExecutable' -PathType Leaf
 
-$existingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+$existingTask = Get-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName -ErrorAction SilentlyContinue
 if ($null -ne $existingTask -and -not $Force) {
     throw "Scheduled task '$TaskName' already exists. Re-run with -Force to replace only this task."
 }
@@ -71,7 +79,7 @@ $settings = New-ScheduledTaskSettingsSet `
     -MultipleInstances IgnoreNew
 $description = 'Runs one nexus-jar-sync synchronization pass. Nexus credentials are supplied through the task account environment.'
 
-if ($PSCmdlet.ShouldProcess($TaskName, 'Register scheduled task')) {
+if ($PSCmdlet.ShouldProcess("$TaskPath$TaskName", 'Register scheduled task')) {
     if ($null -ne $TaskCredential) {
         # The ScheduledTasks API requires the account password as a string. It exists
         # only in memory for this registration call and is never printed or persisted here.
@@ -80,6 +88,7 @@ if ($PSCmdlet.ShouldProcess($TaskName, 'Register scheduled task')) {
         try {
             Register-ScheduledTask `
                 -TaskName $TaskName `
+                -TaskPath $TaskPath `
                 -Action $action `
                 -Trigger $trigger `
                 -Settings $settings `
@@ -100,6 +109,7 @@ if ($PSCmdlet.ShouldProcess($TaskName, 'Register scheduled task')) {
             -RunLevel Limited
         Register-ScheduledTask `
             -TaskName $TaskName `
+            -TaskPath $TaskPath `
             -Action $action `
             -Trigger $trigger `
             -Settings $settings `

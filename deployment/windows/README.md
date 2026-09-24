@@ -52,15 +52,15 @@ Run from an appropriately privileged PowerShell session:
   -TaskCredential $taskAccount
 ```
 
-All paths are resolved and validated as absolute paths before scheduler registration. An existing exact task name causes installation to fail without changes; use `-Force` to replace only that exact task. The task invokes `python -m nexus_jar_sync.main --config ...`, starts missed runs when the machine becomes available, and uses Task Scheduler’s `IgnoreNew` policy to prevent overlap.
+All paths are resolved and validated as absolute paths before scheduler registration. Task names must be plain names: wildcard characters, `/`, `\`, and control characters are rejected. Tasks are always selected and registered in the root Task Scheduler folder (`\`), so an identically named task in another folder is untouched. An existing exact root-folder task causes installation to fail without changes; use `-Force` to replace only that exact task. The task invokes `python -m nexus_jar_sync.main --config ...`, starts missed runs when the machine becomes available, and uses Task Scheduler’s `IgnoreNew` policy to prevent overlap.
 
 Inspect and test it:
 
 ```powershell
-Get-ScheduledTask -TaskName "NexusJarSync"
-Get-ScheduledTaskInfo -TaskName "NexusJarSync"
-Start-ScheduledTask -TaskName "NexusJarSync"
-Get-ScheduledTaskInfo -TaskName "NexusJarSync"
+Get-ScheduledTask -TaskPath "\" -TaskName "NexusJarSync"
+Get-ScheduledTaskInfo -TaskPath "\" -TaskName "NexusJarSync"
+Start-ScheduledTask -TaskPath "\" -TaskName "NexusJarSync"
+Get-ScheduledTaskInfo -TaskPath "\" -TaskName "NexusJarSync"
 Get-Content C:\NexusJarSync\logs\nexus-jar-sync.log -Tail 100
 ```
 
@@ -72,4 +72,4 @@ Get-Content C:\NexusJarSync\logs\nexus-jar-sync.log -Tail 100
 .\deployment\windows\uninstall-task.ps1 -TaskName "NexusJarSync"
 ```
 
-The removal is exact-name, idempotent, and supports `-WhatIf`/`-Confirm`. It does not remove the project, virtual environment, configuration, logs, state, JARs, credentials, or environment variables.
+The removal resolves the exact task in the root folder, unregisters that resolved object, is idempotent, and supports `-WhatIf`/`-Confirm`. It does not remove same-named tasks in other folders, the project, virtual environment, configuration, logs, state, JARs, credentials, or environment variables.

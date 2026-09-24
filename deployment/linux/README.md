@@ -17,12 +17,30 @@ The example units run the existing command once per timer activation. Copy and e
 2. Place the reviewed configuration at `/etc/nexus-jar-sync/config.yaml` (or update the unit). Relative logging, state, CA-bundle, and destination paths resolve from `WorkingDirectory=/opt/nexus-jar-sync`.
 3. Create `/etc/nexus-jar-sync/credentials.env` outside the Git repository with only the environment values referenced by YAML. Do not include real values in unit files or documentation. Restrict the file, for example with root ownership and mode `0600`, while ensuring systemd can load it for the service. Never commit it, print it in diagnostics, or copy it into issue reports. An organization-approved secret manager or systemd credentials can replace this environment-file approach.
 4. Review permissions for the configuration, CA bundle, working directory, every destination directory, state directory, and log directory.
-5. Run both preflight commands as the intended service account:
+5. Run credential-aware preflight through the system manager. This workflow assumes systemd 236 or newer for `--collect` and a manager whose `systemd-run --property` accepts `EnvironmentFile=` for transient service units; distribution backports vary, so verify both capabilities on the deployed system. PID 1 reads the root-owned `0600` file before applying `User=` and `Group=`, so the service account does not need direct permission to read it. The distinct transient unit names are collected automatically. The shell runs the active pass only if the dry-run service succeeds:
 
    ```bash
-   sudo -u nexus-jar-sync /opt/nexus-jar-sync/.venv/bin/python -m nexus_jar_sync.main --config /etc/nexus-jar-sync/config.yaml --dry-run
-   sudo -u nexus-jar-sync /opt/nexus-jar-sync/.venv/bin/python -m nexus_jar_sync.main --config /etc/nexus-jar-sync/config.yaml
+   sudo systemd-run --unit=nexus-jar-sync-preflight-dry-run --collect --wait --pipe \
+     --property=Type=oneshot \
+     --property=User=nexus-jar-sync \
+     --property=Group=nexus-jar-sync \
+     --property=WorkingDirectory=/opt/nexus-jar-sync \
+     --property=EnvironmentFile=/etc/nexus-jar-sync/credentials.env \
+     /opt/nexus-jar-sync/.venv/bin/python -m nexus_jar_sync.main \
+     --config /etc/nexus-jar-sync/config.yaml --dry-run && \
+   sudo systemd-run --unit=nexus-jar-sync-preflight-active --collect --wait --pipe \
+     --property=Type=oneshot \
+     --property=User=nexus-jar-sync \
+     --property=Group=nexus-jar-sync \
+     --property=WorkingDirectory=/opt/nexus-jar-sync \
+     --property=EnvironmentFile=/etc/nexus-jar-sync/credentials.env \
+     /opt/nexus-jar-sync/.venv/bin/python -m nexus_jar_sync.main \
+     --config /etc/nexus-jar-sync/config.yaml
    ```
+
+   This passes only the environment-file path—not its values—to systemd and does not use a shell expansion such as `env $(cat ...)`. Do not enable shell tracing around secret setup.
+
+   If the installed systemd does not support `EnvironmentFile=` as a transient-unit property, use two temporary root-owned unit files under `/run/systemd/system/` based on the reviewed service template: give them distinct names, add `--dry-run` only to the first unit’s `ExecStart`, keep the same `User`, `Group`, `WorkingDirectory`, and `EnvironmentFile`, run the dry-run unit, run the active unit only after success, then remove both temporary units and run `systemctl daemon-reload`. Do not replace this with `sudo -u`, `source`, or `env $(cat ...)`, because those approaches either omit the service environment or risk exposing values.
 
 These checks validate configuration, environment credentials, network/TLS/CA access, and destination, state, and log permissions before scheduling.
 

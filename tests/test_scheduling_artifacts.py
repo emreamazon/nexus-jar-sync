@@ -21,6 +21,17 @@ def read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def powershell_executable() -> str | None:
+    return shutil.which("pwsh") or shutil.which("powershell")
+
+
+def require_parser_language_mode(language_mode: str) -> None:
+    if language_mode != "FullLanguage":
+        pytest.skip(
+            f"PowerShell AST parser validation requires FullLanguage; host uses {language_mode}"
+        )
+
+
 def test_scheduling_artifacts_exist() -> None:
     for path in (INSTALL, UNINSTALL, WINDOWS / "README.md", SERVICE, TIMER, LINUX / "README.md"):
         assert path.is_file(), path
@@ -42,7 +53,7 @@ def test_windows_installer_exposes_and_validates_required_parameters() -> None:
     assert "Resolve-Path -LiteralPath" in script
     assert "IsPathFullyQualified" in script
     assert script.index("Resolve-RequiredPath -LiteralPath $PythonExecutable") < script.index(
-        "Get-ScheduledTask -TaskName"
+        "Get-ScheduledTask -TaskPath"
     )
 
 
@@ -51,7 +62,7 @@ def test_windows_action_is_explicit_one_shot_with_working_directory() -> None:
     assert "New-ScheduledTaskAction" in script
     assert "-Execute $resolvedPython" in script
     assert "-m nexus_jar_sync.main --config" in script
-    assert "--config \"{0}\"' -f $resolvedConfig" in script
+    assert "$arguments = '-m nexus_jar_sync.main --config \"{0}\"' -f $resolvedConfig" in script
     assert "-WorkingDirectory $resolvedProject" in script
     assert "cmd.exe" not in script.lower()
     assert "while ($true)" not in script.lower()
@@ -70,9 +81,65 @@ def test_windows_replacement_requires_force_and_is_exact_name_only() -> None:
     assert "$existingTask" in script
     assert "-not $Force" in script
     assert "already exists" in script
-    assert "-TaskName $TaskName" in script
+    assert "$TaskPath = '\\'" in script
+    assert "Get-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName" in script
+    assert script.count("-TaskPath $TaskPath") == 3
     assert "-Force:$Force" in script
     assert "-TaskName *" not in script
+
+
+@pytest.mark.parametrize("task_name", ["*", "Nexus*", "[abc]", "Nexus?", "folder/name", r"folder\name", "bad\nname"])
+def test_windows_task_name_policy_rejects_unsafe_names(task_name: str) -> None:
+    combined = read(INSTALL) + read(UNINSTALL)
+    assert combined.count("$TaskName.IndexOfAny([char[]]'*?[]/\\') -ge 0") == 2
+    assert combined.count("[char]::IsControl($_)") == 2
+    unsafe_syntax = re.search(r"[*?\[\]/\\]", task_name) is not None
+    has_control = any(ord(character) < 32 or ord(character) == 127 for character in task_name)
+    assert unsafe_syntax or has_control
+
+
+def test_windows_task_name_rejection_uses_powershell_semantics_without_scheduler() -> None:
+    executable = powershell_executable()
+    if executable is None:
+        pytest.skip("PowerShell is unavailable")
+    command = (
+        "$names=@('*','Nexus*','[abc]','Nexus?','folder/name','folder\\name',"
+        "('bad'+[char]10+'name'));"
+        "foreach($name in $names){"
+        "$unsafe=($name.IndexOfAny([char[]]'*?[]/\\') -ge 0) -or "
+        "($null -ne ($name.ToCharArray()|Where-Object{[char]::IsControl($_)}|Select-Object -First 1));"
+        "if(-not $unsafe){Write-Error \"Accepted unsafe name: $name\";exit 1}}"
+    )
+    completed = subprocess.run(
+        [executable, "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_windows_argument_value_for_config_path_with_spaces() -> None:
+    executable = powershell_executable()
+    if executable is None:
+        pytest.skip("PowerShell is unavailable")
+    assignment = next(
+        line.strip() for line in read(INSTALL).splitlines() if line.startswith("$arguments =")
+    )
+    assert '\\"' not in assignment
+    command = (
+        "$resolvedConfig='C:\\Path With Spaces\\config.yaml';"
+        f"{assignment};"
+        "[Console]::Out.Write($arguments)"
+    )
+    completed = subprocess.run(
+        [executable, "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == '-m nexus_jar_sync.main --config "C:\\Path With Spaces\\config.yaml"'
 
 
 def test_windows_credentials_are_not_embedded_or_plaintext_parameters() -> None:
@@ -88,8 +155,10 @@ def test_windows_credentials_are_not_embedded_or_plaintext_parameters() -> None:
 def test_windows_uninstall_is_exact_idempotent_and_non_destructive() -> None:
     script = read(UNINSTALL)
     assert "SupportsShouldProcess = $true" in script
-    assert "Get-ScheduledTask -TaskName $TaskName" in script
-    assert "Unregister-ScheduledTask -TaskName $TaskName" in script
+    assert "$TaskPath = '\\'" in script
+    assert "Get-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName" in script
+    assert "Unregister-ScheduledTask -InputObject $task" in script
+    assert "Unregister-ScheduledTask -TaskName" not in script
     assert "nothing to remove" in script
     assert "Remove-Item" not in script
     assert "-TaskName *" not in script
@@ -99,9 +168,24 @@ def test_windows_uninstall_is_exact_idempotent_and_non_destructive() -> None:
 
 @pytest.mark.parametrize("script_path", [INSTALL, UNINSTALL])
 def test_powershell_scripts_parse_when_powershell_is_available(script_path: Path) -> None:
-    executable = shutil.which("pwsh") or shutil.which("powershell")
+    executable = powershell_executable()
     if executable is None:
         pytest.skip("PowerShell is unavailable")
+    mode = subprocess.run(
+        [
+            executable,
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$ExecutionContext.SessionState.LanguageMode.ToString()",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert mode.returncode == 0, mode.stderr
+    language_mode = mode.stdout.strip()
+    require_parser_language_mode(language_mode)
     quoted_path = str(script_path).replace("'", "''")
     parser = (
         "$tokens=$null;$errors=$null;"
@@ -115,7 +199,20 @@ def test_powershell_scripts_parse_when_powershell_is_available(script_path: Path
         text=True,
         check=False,
     )
+    if completed.returncode != 0:
+        policy_markers = (
+            "constrainedlanguage",
+            "method invocation is supported only",
+            "not allowed in this language mode",
+        )
+        if any(marker in completed.stderr.lower() for marker in policy_markers):
+            pytest.skip("PowerShell policy blocks AST parser access")
     assert completed.returncode == 0, completed.stderr
+
+
+def test_parser_validation_skips_in_constrained_language() -> None:
+    with pytest.raises(pytest.skip.Exception, match="ConstrainedLanguage"):
+        require_parser_language_mode("ConstrainedLanguage")
 
 
 def test_linux_service_is_explicit_one_shot() -> None:
@@ -174,6 +271,22 @@ def test_platform_documentation_covers_operations_permissions_and_placeholders()
         "WorkingDirectory",
     ):
         assert phrase.lower() in linux.lower()
+
+
+def test_linux_preflight_uses_service_identity_working_directory_and_environment_file() -> None:
+    documentation = read(LINUX / "README.md")
+    assert documentation.count("--unit=nexus-jar-sync-preflight-") == 2
+    assert documentation.count("--property=User=nexus-jar-sync") == 2
+    assert documentation.count("--property=Group=nexus-jar-sync") == 2
+    assert documentation.count("--property=WorkingDirectory=/opt/nexus-jar-sync") == 2
+    assert documentation.count(
+        "--property=EnvironmentFile=/etc/nexus-jar-sync/credentials.env"
+    ) == 2
+    assert "--dry-run &&" in documentation
+    assert "--collect --wait --pipe" in documentation
+    assert "systemd 236 or newer" in documentation
+    assert "sudo -u nexus-jar-sync /opt" not in documentation
+    assert "env $(cat /etc/nexus-jar-sync/credentials.env)" not in documentation
 
 
 def test_no_scheduler_dependency_or_application_loop_was_added() -> None:
