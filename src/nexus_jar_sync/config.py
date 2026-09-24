@@ -60,11 +60,6 @@ class ArtifactConfig:
 
 
 @dataclass(frozen=True)
-class RetentionConfig:
-    keep_previous_versions: int = 1
-
-
-@dataclass(frozen=True)
 class NexusConfig:
     url: str
     repository: str
@@ -86,7 +81,6 @@ class TargetConfig:
     network: NetworkConfig
     auth: AuthConfig
     artifact: ArtifactConfig
-    retention: RetentionConfig
 
 
 @dataclass(frozen=True)
@@ -110,7 +104,6 @@ _DEFAULT_NETWORK: dict[str, Any] = {
 _DEFAULT_AUTH: dict[str, Any] = {"username_env": None, "password_env": None}
 _AUTH_KEYS = frozenset(_DEFAULT_AUTH)
 _DEFAULT_ARTIFACT: dict[str, Any] = {"extension": "jar", "classifier": None}
-_DEFAULT_RETENTION: dict[str, Any] = {"keep_previous_versions": 1}
 _DEFAULT_LOGGING: dict[str, Any] = {
     "level": "INFO",
     "file": "logs/nexus-jar-sync.log",
@@ -147,7 +140,8 @@ def load_config(path: str | Path) -> AppConfig:
     default_network = _merged_section(_DEFAULT_NETWORK, defaults, "network", "defaults")
     default_auth = _merged_section(_DEFAULT_AUTH, defaults, "auth", "defaults")
     default_artifact = _merged_section(_DEFAULT_ARTIFACT, defaults, "artifact", "defaults")
-    default_retention = _merged_section(_DEFAULT_RETENTION, defaults, "target", "defaults")
+    if "target" in defaults:
+        raise ConfigError("'defaults.target' is obsolete; deployed artifacts are append-only")
     logging_config = _parse_logging(_merged_section(_DEFAULT_LOGGING, root, "logging", "root"))
     state_config = _parse_state(_merged_section(_DEFAULT_STATE, root, "state", "root"))
 
@@ -160,7 +154,6 @@ def load_config(path: str | Path) -> AppConfig:
             default_network,
             default_auth,
             default_artifact,
-            default_retention,
         )
         if target.id in seen_ids:
             raise ConfigError(f"Duplicate target id: '{target.id}'")
@@ -215,9 +208,13 @@ def _parse_target(
     default_network: Mapping[str, Any],
     default_auth: Mapping[str, Any],
     default_artifact: Mapping[str, Any],
-    default_retention: Mapping[str, Any],
 ) -> TargetConfig:
     target_id = _required_text(raw, "id", f"Target at index {index}")
+    if "target" in raw:
+        raise ConfigError(
+            f"'target.keep_previous_versions' is obsolete for target '{target_id}'; "
+            "deployed artifacts are append-only"
+        )
     enabled = raw.get("enabled", True)
     if not isinstance(enabled, bool):
         raise ConfigError(f"'enabled' must be a boolean for target '{target_id}'")
@@ -247,7 +244,6 @@ def _parse_target(
     network_values = _merged_section(default_network, raw, "network", f"target '{target_id}'")
     auth_values = _merged_section(default_auth, raw, "auth", f"target '{target_id}'")
     artifact_values = _merged_section(default_artifact, raw, "artifact", f"target '{target_id}'")
-    retention_values = _merged_section(default_retention, raw, "target", f"target '{target_id}'")
 
     return TargetConfig(
         id=target_id,
@@ -257,7 +253,6 @@ def _parse_target(
         network=_parse_network(network_values, target_id),
         auth=_parse_auth(auth_values, target_id),
         artifact=_parse_artifact(artifact_values, target_id),
-        retention=_parse_retention(retention_values, target_id),
     )
 
 
@@ -307,15 +302,6 @@ def _parse_artifact(values: Mapping[str, Any], target_id: str) -> ArtifactConfig
     if classifier is not None and (not isinstance(classifier, str) or not classifier.strip()):
         raise ConfigError(f"'classifier' must be a non-empty string or null for target '{target_id}'")
     return ArtifactConfig(extension=extension.strip(), classifier=classifier.strip() if classifier else None)
-
-
-def _parse_retention(values: Mapping[str, Any], target_id: str) -> RetentionConfig:
-    keep = values.get("keep_previous_versions")
-    if not _is_int(keep) or keep < 0:
-        raise ConfigError(
-            f"'keep_previous_versions' must be an integer of at least 0 for target '{target_id}'"
-        )
-    return RetentionConfig(keep_previous_versions=keep)
 
 
 def _merged_section(

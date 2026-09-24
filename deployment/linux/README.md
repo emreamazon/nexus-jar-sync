@@ -78,4 +78,4 @@ sudo rm /etc/systemd/system/nexus-jar-sync.timer /etc/systemd/system/nexus-jar-s
 sudo systemctl daemon-reload
 ```
 
-Removing units does not remove application files, configuration, credentials, logs, state, or synchronized JARs. Remove those separately only under your organization’s data-retention policy.
+Removing units does not remove application files, configuration, credentials, logs, state, or synchronized JARs. Configured destinations are bases containing exact-version child directories; deployed artifacts are append-only. Nexus access is GET-only, so grant the service account only repository browse/read permissions. Remove operational data separately only under your organization’s policy.

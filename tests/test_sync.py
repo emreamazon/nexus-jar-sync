@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import logging
 from pathlib import Path
@@ -14,12 +15,10 @@ from nexus_jar_sync.config import (
     DestinationConfig,
     NetworkConfig,
     NexusConfig,
-    RetentionConfig,
     StateConfig,
     TargetConfig,
 )
-from nexus_jar_sync.downloader import DownloadError, DownloadResult
-from nexus_jar_sync.lifecycle import LifecycleError
+from nexus_jar_sync.downloader import DownloadDisposition, DownloadError, DownloadResult
 from nexus_jar_sync.nexus_client import NexusAsset, NexusClientError
 from nexus_jar_sync.retry import RetryExecutor
 from nexus_jar_sync.state import ChangeDecision, StateError, TargetState
@@ -39,7 +38,6 @@ def make_target(target_id: str, destination: Path, *, enabled: bool = True, retr
         network=NetworkConfig(retries=retries, retry_delay_seconds=2),
         auth=AuthConfig(),
         artifact=ArtifactConfig(),
-        retention=RetentionConfig(),
     )
 
 
@@ -92,11 +90,12 @@ class FakeDownloader:
                 raise outcome
             return outcome
         return DownloadResult(
-            path=(target.destination.directory / asset.filename).resolve(strict=False),
+            path=(target.destination.directory / asset.version / asset.filename).resolve(strict=False),
             filename=asset.filename,
             bytes_written=100,
             checksum_algorithm="sha256",
             checksum=asset.checksums["sha256"],
+            disposition=DownloadDisposition.REUSED,
         )
 
 
@@ -111,7 +110,7 @@ class FakeLifecycle:
         if self.before_call is not None:
             self.before_call()
         if target.id in self.failures:
-            raise LifecycleError(f"retention failed for target '{target.id}'")
+            raise RuntimeError(f"retired lifecycle invoked for target '{target.id}'")
         return ()
 
 
@@ -155,7 +154,6 @@ def make_service(
     return SyncService(
         nexus_client=client,  # type: ignore[arg-type]
         downloader=downloader,  # type: ignore[arg-type]
-        lifecycle=lifecycle,  # type: ignore[arg-type]
         retry_executor=RetryExecutor(sleep=sleep_calls.append, logger=logger),
         state_store_factory=lambda path: store,  # type: ignore[return-value]
         clock=lambda: NOW,
@@ -174,7 +172,10 @@ def test_disabled_targets_skipped_and_enabled_order_preserved(tmp_path: Path) ->
         make_target("two", tmp_path / "two"),
     )
     client = FakeClient({"one": [make_asset()], "two": [make_asset()]})
-    store = FakeStore({"one": make_state(), "two": make_state()})
+    store = FakeStore({
+        "one": make_state(path=str((tmp_path / "one" / "2.0" / "application-2.0.jar").resolve())),
+        "two": make_state(path=str((tmp_path / "two" / "2.0" / "application-2.0.jar").resolve())),
+    })
     summary = make_service(client, FakeDownloader(), FakeLifecycle(), store).run(
         app_config(tmp_path, *targets)
     )
@@ -208,6 +209,11 @@ def test_update_changes_download_retain_and_save_verified_state(
 ) -> None:
     target = make_target("one", tmp_path / "destination")
     asset = make_asset()
+    if state is not None and expected_change is not ChangeDecision.PATH_CHANGED:
+        state = replace(
+            state,
+            path=str((target.destination.directory / state.version / f"application-{state.version}.jar").resolve()),
+        )
     store = FakeStore({"one": state})
     downloader = FakeDownloader()
     lifecycle = FakeLifecycle(before_call=lambda: assert_no_saves(store))
@@ -218,10 +224,10 @@ def test_update_changes_download_retain_and_save_verified_state(
     assert result.status is TargetSyncStatus.UPDATED
     assert result.change is expected_change
     assert downloader.calls == ["one"]
-    assert lifecycle.calls == ["one"]
+    assert lifecycle.calls == []
     saved = store.saves[0][1]
     assert saved.version == asset.version
-    assert saved.path == asset.path
+    assert saved.path == str((target.destination.directory / asset.version / asset.filename).resolve())
     assert saved.checksum_algorithm == "sha256"
     assert saved.checksum == SHA256
     assert saved.downloaded_at == NOW.isoformat()
@@ -236,12 +242,21 @@ def test_current_target_has_no_mutation(tmp_path: Path) -> None:
     target = make_target("one", tmp_path)
     downloader = FakeDownloader()
     lifecycle = FakeLifecycle()
-    store = FakeStore({"one": make_state()})
+    deployed = tmp_path / "2.0" / "application-2.0.jar"
+    deployed.parent.mkdir()
+    deployed.write_bytes(b"placeholder")
+    # The fake downloader models local verification; state uses the versioned path.
+    store = FakeStore({"one": make_state(path=str(deployed.resolve()))})
+    downloader.outcomes["one"] = [DownloadResult(
+        path=deployed.resolve(), filename="application-2.0.jar", bytes_written=11,
+        checksum_algorithm="sha256", checksum=SHA256,
+        disposition=DownloadDisposition.REUSED,
+    )]
     result = make_service(FakeClient({"one": [make_asset()]}), downloader, lifecycle, store).run(
         app_config(tmp_path, target)
     ).results[0]
     assert result.status is TargetSyncStatus.CURRENT
-    assert downloader.calls == []
+    assert downloader.calls == ["one"]
     assert lifecycle.calls == []
     assert store.saves == []
 
@@ -253,7 +268,7 @@ def test_discovery_and_download_retries_continue_pipeline(tmp_path: Path) -> Non
         {"one": [NexusClientError("transient discovery", retryable=True), asset]}
     )
     successful_result = DownloadResult(
-        path=(tmp_path / asset.filename).resolve(strict=False),
+        path=(tmp_path / asset.version / asset.filename).resolve(strict=False),
         filename=asset.filename,
         bytes_written=10,
         checksum_algorithm="sha256",
@@ -274,7 +289,7 @@ def test_discovery_and_download_retries_continue_pipeline(tmp_path: Path) -> Non
     assert len(store.saves) == 1
 
 
-@pytest.mark.parametrize("stage", ["discovery", "state-load", "download", "retention", "state-save"])
+@pytest.mark.parametrize("stage", ["discovery", "state-load", "download", "state-save"])
 def test_operational_failures_stop_downstream_and_return_failed(
     tmp_path: Path, stage: str
 ) -> None:
@@ -298,8 +313,6 @@ def test_operational_failures_stop_downstream_and_return_failed(
                 DownloadError("safe download failure", retryable=True),
             ]
         }
-    elif stage == "retention":
-        lifecycle.failures.add("one")
     else:
         store.save_failures.add("one")
     downloader = FakeDownloader(downloader_outcomes)
@@ -326,8 +339,6 @@ def test_operational_failures_stop_downstream_and_return_failed(
     elif stage == "download":
         assert downloader.calls == ["one", "one"]
         assert lifecycle.calls == []
-    elif stage == "retention":
-        assert lifecycle.calls == ["one"]
 
 
 def test_failed_target_does_not_stop_later_target_and_counts_are_correct(tmp_path: Path) -> None:
@@ -335,7 +346,7 @@ def test_failed_target_does_not_stop_later_target_and_counts_are_correct(tmp_pat
     client = FakeClient(
         {"bad": [NexusClientError("safe failure")], "good": [make_asset()]}
     )
-    store = FakeStore({"good": make_state()})
+    store = FakeStore({"good": make_state(path=str((tmp_path / "good" / "2.0" / "application-2.0.jar").resolve()))})
     summary = make_service(client, FakeDownloader(), FakeLifecycle(), store).run(
         app_config(tmp_path, *targets)
     )
@@ -348,7 +359,7 @@ def test_failed_target_does_not_stop_later_target_and_counts_are_correct(tmp_pat
     assert summary.current_count == 1
 
 
-def test_mismatched_download_result_stops_before_retention_and_state(tmp_path: Path) -> None:
+def test_mismatched_download_result_stops_before_state(tmp_path: Path) -> None:
     target = make_target("one", tmp_path)
     asset = make_asset()
     mismatched = DownloadResult(
@@ -374,7 +385,8 @@ def test_mismatched_download_result_stops_before_retention_and_state(tmp_path: P
 def test_state_save_failure_does_not_remove_deployed_artifact(tmp_path: Path) -> None:
     target = make_target("one", tmp_path)
     asset = make_asset()
-    deployed = tmp_path / asset.filename
+    deployed = tmp_path / asset.version / asset.filename
+    deployed.parent.mkdir()
     deployed.write_bytes(b"verified artifact")
     result_value = DownloadResult(
         path=deployed,
@@ -464,6 +476,11 @@ def test_dry_run_reports_changes_without_mutation(
     tmp_path: Path, state: TargetState | None, decision: ChangeDecision
 ) -> None:
     target = make_target("one", tmp_path / "destination")
+    if state is not None and decision is not ChangeDecision.PATH_CHANGED:
+        state = replace(
+            state,
+            path=str((target.destination.directory / state.version / f"application-{state.version}.jar").resolve()),
+        )
     store = FakeStore({"one": state})
     downloader = FakeDownloader()
     lifecycle = FakeLifecycle()
@@ -484,7 +501,7 @@ def test_dry_run_reports_changes_without_mutation(
 
 def test_dry_run_current_target_remains_current_without_mutation(tmp_path: Path) -> None:
     target = make_target("one", tmp_path / "destination")
-    store = FakeStore({"one": make_state()})
+    store = FakeStore({"one": make_state(path=str((target.destination.directory / "2.0" / "application-2.0.jar").resolve()))})
     downloader = FakeDownloader()
     lifecycle = FakeLifecycle()
     summary = make_service(
@@ -504,7 +521,7 @@ def test_dry_run_preserves_order_retries_and_failure_isolation(tmp_path: Path) -
             "three": [make_asset()],
         }
     )
-    store = FakeStore({"three": make_state()})
+    store = FakeStore({"three": make_state(path=str((tmp_path / "three" / "2.0" / "application-2.0.jar").resolve()))})
     sleeps: list[float] = []
     summary = make_service(
         client, FakeDownloader(), FakeLifecycle(), store, sleeps=sleeps

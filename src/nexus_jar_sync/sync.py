@@ -11,8 +11,12 @@ import logging
 from pathlib import Path
 
 from nexus_jar_sync.config import AppConfig, TargetConfig
-from nexus_jar_sync.downloader import ArtifactDownloader, DownloadError, DownloadResult
-from nexus_jar_sync.lifecycle import ArtifactLifecycleManager, LifecycleError
+from nexus_jar_sync.downloader import (
+    ArtifactDownloader,
+    DownloadDisposition,
+    DownloadError,
+    DownloadResult,
+)
 from nexus_jar_sync.nexus_client import NexusAsset, NexusClient, NexusClientError
 from nexus_jar_sync.retry import RetryExecutor
 from nexus_jar_sync.state import ChangeDecision, StateError, StateStore, TargetState, determine_change
@@ -61,7 +65,6 @@ class SyncService:
         *,
         nexus_client: NexusClient,
         downloader: ArtifactDownloader,
-        lifecycle: ArtifactLifecycleManager,
         retry_executor: RetryExecutor,
         state_store_factory: Callable[[Path], StateStore] = StateStore,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
@@ -69,7 +72,6 @@ class SyncService:
     ) -> None:
         self._nexus_client = nexus_client
         self._downloader = downloader
-        self._lifecycle = lifecycle
         self._retry = retry_executor
         self._state_store_factory = state_store_factory
         self._clock = clock
@@ -123,8 +125,9 @@ class SyncService:
             )
             self._logger.info("Target %s: discovered version %s", target.id, asset.version)
             state = store.load(target.id)
-            change = determine_change(state, asset)
-            if change is ChangeDecision.CURRENT:
+            expected_path = ArtifactDownloader._validated_final_path(asset, target)
+            change = determine_change(state, asset, expected_path)
+            if dry_run and change is ChangeDecision.CURRENT:
                 self._logger.info("Target %s: current; no change", target.id)
                 return TargetSyncResult(
                     target_id=target.id,
@@ -134,8 +137,8 @@ class SyncService:
                     message="Artifact is current",
                 )
 
-            self._logger.info("Target %s: change detected: %s", target.id, change.value)
             if dry_run:
+                self._logger.info("Target %s: change detected: %s", target.id, change.value)
                 self._logger.info("Target %s: would update to version %s", target.id, asset.version)
                 return TargetSyncResult(
                     target_id=target.id,
@@ -152,11 +155,22 @@ class SyncService:
                 target_id=target.id,
             )
             self._validate_download_result(download, asset, target)
-            self._logger.info(
-                "Target %s: downloaded %d bytes", target.id, download.bytes_written
-            )
-            removed = self._lifecycle.apply_retention(target, download.path)
-            self._logger.info("Target %s: retention removed %d files", target.id, len(removed))
+            if download.disposition is DownloadDisposition.REUSED:
+                self._logger.info("Target %s: verified existing artifact", target.id)
+            else:
+                self._logger.info(
+                    "Target %s: downloaded %d bytes", target.id, download.bytes_written
+                )
+
+            if change is ChangeDecision.CURRENT and download.disposition is DownloadDisposition.REUSED:
+                self._logger.info("Target %s: current; no change", target.id)
+                return TargetSyncResult(
+                    target_id=target.id,
+                    status=TargetSyncStatus.CURRENT,
+                    version=asset.version,
+                    change=change,
+                    message="Artifact is current",
+                )
 
             timestamp = self._clock()
             if timestamp.tzinfo is None or timestamp.utcoffset() is None:
@@ -165,7 +179,7 @@ class SyncService:
                 target.id,
                 TargetState(
                     version=asset.version,
-                    path=asset.path,
+                    path=str(download.path),
                     checksum_algorithm=download.checksum_algorithm,
                     checksum=download.checksum,
                     downloaded_at=timestamp.isoformat(),
@@ -179,7 +193,7 @@ class SyncService:
                 change=change,
                 message=f"Updated to version {asset.version}",
             )
-        except (NexusClientError, DownloadError, LifecycleError, StateError) as error:
+        except (NexusClientError, DownloadError, StateError) as error:
             self._logger.error("Target %s failed: %s", target.id, error)
             return TargetSyncResult(
                 target_id=target.id,
@@ -193,7 +207,7 @@ class SyncService:
     def _validate_download_result(
         result: DownloadResult, asset: NexusAsset, target: TargetConfig
     ) -> None:
-        expected_path = (target.destination.directory / asset.filename).resolve(strict=False)
+        expected_path = ArtifactDownloader._validated_final_path(asset, target)
         expected_checksum = asset.checksums.get(result.checksum_algorithm)
         if (
             result.filename != asset.filename

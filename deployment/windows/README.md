@@ -36,7 +36,7 @@ $taskAccount = Get-Credential -Message "Windows account for NexusJarSync"
 
 The script converts that secure credential only in memory because the ScheduledTasks API requires it during registration. It never prints it, writes it to a file, or places it in task arguments. This Windows account password is separate from Nexus credentials. Do not supply plaintext passwords on a command line. The template does not default to S4U because network authentication can be unavailable, and it does not default to SYSTEM because that identity needs separately administered credentials and filesystem permissions.
 
-The chosen account needs Nexus network access and read/write access to configured destinations, state, and logs, plus read access to the config and any CA bundle. Credential environment variables must be visible to that same account.
+The chosen account needs GET-only Nexus browse/read access and read/write access to configured destination bases, state, and logs, plus read access to the config and any CA bundle. Each exact Nexus version becomes an append-only child directory of its destination base; old artifacts are not cleaned up. Credential environment variables must be visible to that same account.
 
 ## Install and operate
 

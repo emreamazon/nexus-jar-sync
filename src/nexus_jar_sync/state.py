@@ -95,13 +95,16 @@ class StateStore:
             raise StateError(f"Could not save state for target '{target_id}': {exc}") from None
 
 
-def determine_change(state: TargetState | None, asset: NexusAsset) -> ChangeDecision:
+def determine_change(
+    state: TargetState | None, asset: NexusAsset, expected_path: str | Path | None = None
+) -> ChangeDecision:
     """Compare stored state with a discovery result without filesystem effects."""
     if state is None:
         return ChangeDecision.FIRST_RUN
     if state.version != asset.version:
         return ChangeDecision.VERSION_CHANGED
-    if state.path != asset.path:
+    compared_path = asset.path if expected_path is None else expected_path
+    if Path(state.path).resolve(strict=False) != Path(compared_path).resolve(strict=False):
         return ChangeDecision.PATH_CHANGED
     algorithm = state.checksum_algorithm.lower()
     current_checksum = asset.checksums.get(algorithm)

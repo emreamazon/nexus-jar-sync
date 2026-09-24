@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,6 @@ from nexus_jar_sync.config import (
     DestinationConfig,
     NetworkConfig,
     NexusConfig,
-    RetentionConfig,
     TargetConfig,
 )
 from nexus_jar_sync.nexus_client import NexusClient, NexusClientError
@@ -75,7 +75,6 @@ def make_target(
         ),
         auth=AuthConfig(username=username, password=password),
         artifact=ArtifactConfig(extension=extension, classifier=classifier),
-        retention=RetentionConfig(),
     )
 
 
@@ -435,3 +434,16 @@ def test_close_closes_owned_session(monkeypatch: pytest.MonkeyPatch) -> None:
     client = NexusClient()
     client.close()
     assert session.closed
+
+
+def test_production_nexus_transport_is_get_only() -> None:
+    root = Path(__file__).parents[1] / "src" / "nexus_jar_sync"
+    for source_name in ("nexus_client.py", "downloader.py"):
+        tree = ast.parse((root / source_name).read_text(encoding="utf-8"))
+        methods = {
+            node.func.attr.lower()
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
+        assert methods.isdisjoint({"post", "put", "patch", "delete"})
+        assert "get" in methods

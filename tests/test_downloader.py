@@ -14,7 +14,6 @@ from nexus_jar_sync.config import (
     DestinationConfig,
     NetworkConfig,
     NexusConfig,
-    RetentionConfig,
     TargetConfig,
 )
 from nexus_jar_sync.downloader import ArtifactDownloader, DownloadError
@@ -89,7 +88,6 @@ def make_target(
         network=NetworkConfig(timeout_seconds=17, verify_tls=verify_tls, ca_bundle=ca_bundle),
         auth=AuthConfig(username=username, password=password),
         artifact=ArtifactConfig(extension=extension, classifier=classifier),
-        retention=RetentionConfig(),
     )
 
 
@@ -112,7 +110,7 @@ def make_asset(
 
 
 def temporary_downloads(destination: Path) -> list[Path]:
-    return list(destination.glob("*.download.tmp"))
+    return list(destination.rglob("*.download.tmp"))
 
 
 def test_request_options_streaming_and_result(tmp_path: Path) -> None:
@@ -358,29 +356,31 @@ def test_fsync_failure_preserves_existing_file(
     assert not temporary_downloads(tmp_path)
 
 
-def test_atomic_replace_failure_preserves_existing_file(
+def test_no_clobber_publication_failure_preserves_existing_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    final = tmp_path / "application-1.0.0.jar"
-    final.write_bytes(b"existing")
+    existing_flat = tmp_path / "application-1.0.0.jar"
+    existing_flat.write_bytes(b"existing")
     monkeypatch.setattr(
         downloader_module.os,
-        "replace",
+        "link",
         lambda source, destination: (_ for _ in ()).throw(OSError()),
     )
-    with pytest.raises(DownloadError, match="atomically deploy"):
+    with pytest.raises(DownloadError, match="without overwriting"):
         ArtifactDownloader(FakeSession(FakeResponse())).download(
             make_asset(), make_target(tmp_path)
         )
-    assert final.read_bytes() == b"existing"
+    assert existing_flat.read_bytes() == b"existing"
     assert not temporary_downloads(tmp_path)
 
 
-def test_success_atomically_replaces_existing_file(tmp_path: Path) -> None:
-    final = tmp_path / "application-1.0.0.jar"
+def test_existing_conflicting_file_is_never_replaced(tmp_path: Path) -> None:
+    final = tmp_path / "1.0.0" / "application-1.0.0.jar"
+    final.parent.mkdir()
     final.write_bytes(b"existing")
-    ArtifactDownloader(FakeSession(FakeResponse())).download(make_asset(), make_target(tmp_path))
-    assert final.read_bytes() == CONTENT
+    with pytest.raises(DownloadError, match="checksum conflict"):
+        ArtifactDownloader(FakeSession(FakeResponse())).download(make_asset(), make_target(tmp_path))
+    assert final.read_bytes() == b"existing"
 
 
 @pytest.mark.parametrize(
@@ -482,12 +482,12 @@ def test_unsafe_filename_failure_is_not_retryable(tmp_path: Path) -> None:
     assert caught.value.retryable is False
 
 
-def test_atomic_replacement_failure_is_not_retryable(
+def test_no_clobber_publication_failure_is_not_retryable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
         downloader_module.os,
-        "replace",
+        "link",
         lambda source, destination: (_ for _ in ()).throw(OSError()),
     )
     with pytest.raises(DownloadError) as caught:
@@ -511,3 +511,69 @@ def test_close_closes_owned_session(monkeypatch: pytest.MonkeyPatch) -> None:
     downloader = ArtifactDownloader()
     downloader.close()
     assert session.closed
+
+
+@pytest.mark.parametrize(
+    "version",
+    ["", ".", "..", "../escape", "one/two", "one\\two", "C:drive", "bad:name", "CON", "nul.txt", "trail.", "trail ", "bad\x00value", "bad\x1fvalue"],
+)
+def test_unsafe_version_directory_components_fail_before_side_effects(
+    tmp_path: Path, version: str
+) -> None:
+    session = FakeSession(FakeResponse())
+    with pytest.raises(DownloadError, match="Unsafe artifact version"):
+        ArtifactDownloader(session).download(
+            make_asset(version=version, filename=f"application-{version}.jar"),
+            make_target(tmp_path / "destination"),
+        )
+    assert session.calls == []
+    assert not (tmp_path / "destination").exists()
+
+
+def test_matching_existing_versioned_artifact_is_reused_without_get_or_timestamp_change(
+    tmp_path: Path,
+) -> None:
+    final = tmp_path / "destination" / "1.0.0" / "application-1.0.0.jar"
+    final.parent.mkdir(parents=True)
+    final.write_bytes(CONTENT)
+    before = final.stat().st_mtime_ns
+    session = FakeSession(FakeResponse())
+    result = ArtifactDownloader(session).download(make_asset(), make_target(tmp_path / "destination"))
+    assert result.path == final.resolve()
+    assert result.disposition.value == "reused"
+    assert session.calls == []
+    assert final.stat().st_mtime_ns == before
+
+
+def test_publication_race_reuses_identical_winner_without_overwrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    final = tmp_path / "destination" / "1.0.0" / "application-1.0.0.jar"
+
+    def race(source: Path, destination: Path) -> None:
+        final.write_bytes(CONTENT)
+        raise FileExistsError
+
+    monkeypatch.setattr(downloader_module.os, "link", race)
+    result = ArtifactDownloader(FakeSession(FakeResponse())).download(
+        make_asset(), make_target(tmp_path / "destination")
+    )
+    assert result.disposition.value == "reused"
+    assert final.read_bytes() == CONTENT
+    assert not temporary_downloads(tmp_path / "destination")
+
+
+def test_version_directory_symlink_escape_is_rejected(tmp_path: Path) -> None:
+    base = tmp_path / "destination"
+    outside = tmp_path / "outside"
+    base.mkdir()
+    outside.mkdir()
+    try:
+        (base / "1.0.0").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("directory symlinks are unavailable")
+    session = FakeSession(FakeResponse())
+    with pytest.raises(DownloadError, match="destination/version"):
+        ArtifactDownloader(session).download(make_asset(), make_target(base))
+    assert session.calls == []
+    assert list(outside.iterdir()) == []

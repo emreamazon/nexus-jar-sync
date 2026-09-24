@@ -76,7 +76,9 @@ Copy-Item -LiteralPath .\config\config.windows.example.yaml -Destination $config
 cp --no-clobber config/config.linux.example.yaml /etc/nexus-jar-sync/config.yaml
 ```
 
-The examples show multiple independent targets, shared defaults, per-target credentials, classifier and main JARs, network overrides, retention, and disabled targets. Adding, removing, enabling, or changing targets requires only YAML changes. Define the referenced credential environment variables through the approved mechanism for the eventual scheduler account; never put values in YAML or the bundle.
+The examples show multiple independent targets, shared defaults, per-target credentials, classifier and main JARs, network overrides, shared append-only version directories, and disabled targets. Each required file is a separate YAML target. `destination.directory` is the base; the exact validated Nexus version is created beneath it. Old artifacts are never removed, and flat-layout artifacts are not migrated. Define the referenced credential environment variables through the approved mechanism for the eventual scheduler account; never put values in YAML or the bundle.
+
+Nexus access is GET-only. Give the runtime identity only the browse/read permissions required for its configured repositories.
 
 Run these manually before scheduling:
 

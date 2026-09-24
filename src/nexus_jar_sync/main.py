@@ -10,7 +10,6 @@ import sys
 
 from nexus_jar_sync.config import ConfigError, load_config
 from nexus_jar_sync.downloader import ArtifactDownloader
-from nexus_jar_sync.lifecycle import ArtifactLifecycleManager
 from nexus_jar_sync.logging_config import configure_logging
 from nexus_jar_sync.nexus_client import NexusClient
 from nexus_jar_sync.retry import RetryExecutor
@@ -37,7 +36,6 @@ def create_sync_service(logger: logging.Logger) -> SyncService:
     return SyncService(
         nexus_client=nexus_client,
         downloader=downloader,
-        lifecycle=ArtifactLifecycleManager(),
         retry_executor=retry_executor,
         state_store_factory=StateStore,
         clock=lambda: datetime.now(timezone.utc),
@@ -65,7 +63,7 @@ def format_summary(summary: SyncSummary, *, dry_run: bool) -> str:
     )
     if dry_run:
         lines.extend(
-            ["", "No artifact, destination, retention, or state changes were made."]
+            ["", "No artifact, destination, or state changes were made."]
         )
     return "\n".join(lines)
 

@@ -22,10 +22,8 @@ defaults:
   artifact:
     extension: "jar"
     classifier: null
-  target:
-    keep_previous_versions: 1
-
 targets:
+# Each required file is a separate target. Matching versions share one child directory.
   - id: "sample-application"
     enabled: true
     nexus:
@@ -36,25 +34,23 @@ targets:
     destination:
       directory: "/srv/nexus-jar-sync/artifacts/application"
 
-  - id: "sample-tools-bundle"
+  - id: "sample-application-dependencies"
     enabled: true
     nexus:
-      url: "https://nexus-two.example.invalid"
-      repository: "tools-releases"
-      group_id: "org.example.tools"
-      artifact_id: "tools-bundle"
+      url: "https://nexus-one.example.invalid"
+      repository: "sample-releases"
+      group_id: "org.example.sample"
+      artifact_id: "sample-application"
     auth:
       username_env: "TOOLS_NEXUS_USERNAME"
       password_env: "TOOLS_NEXUS_PASSWORD"
     artifact:
-      classifier: "all"
+      classifier: "dependencies"
     network:
       timeout_seconds: 15
       retries: 1
     destination:
-      directory: "/srv/nexus-jar-sync/artifacts/tools"
-    target:
-      keep_previous_versions: 3
+      directory: "/srv/nexus-jar-sync/artifacts/application"
 
   - id: "sample-disabled"
     enabled: false

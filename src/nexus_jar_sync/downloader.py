@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 import hashlib
 import hmac
 import os
 from pathlib import Path
+import re
+import stat
 import tempfile
 from typing import Any, Protocol
 
@@ -24,6 +27,11 @@ class DownloadError(Exception):
         self.retryable = retryable
 
 
+class DownloadDisposition(Enum):
+    DOWNLOADED = "downloaded"
+    REUSED = "reused"
+
+
 @dataclass(frozen=True)
 class DownloadResult:
     path: Path
@@ -31,10 +39,46 @@ class DownloadResult:
     bytes_written: int
     checksum_algorithm: str
     checksum: str
+    disposition: DownloadDisposition = DownloadDisposition.DOWNLOADED
 
 
 class _Session(Protocol):
     def get(self, url: str, **kwargs: Any) -> Any: ...
+
+
+_WINDOWS_INVALID = frozenset('<>:"/\\|?*')
+_WINDOWS_RESERVED = frozenset(
+    {"CON", "PRN", "AUX", "NUL", "CLOCK$"}
+    | {f"COM{number}" for number in range(1, 10)}
+    | {f"LPT{number}" for number in range(1, 10)}
+)
+
+
+def _safe_component(value: object, description: str, target_id: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value in {".", ".."}
+        or value[-1] in {" ", "."}
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        or any(character in _WINDOWS_INVALID for character in value)
+        or Path(value).is_absolute()
+        or re.match(r"^[A-Za-z]:", value) is not None
+        or value.split(".", 1)[0].upper() in _WINDOWS_RESERVED
+    ):
+        raise DownloadError(f"Unsafe {description} for target '{target_id}'")
+    return value
+
+
+def _unsafe_existing_path(path: Path) -> bool:
+    try:
+        if path.is_symlink():
+            return True
+        details = path.lstat()
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        return bool(getattr(details, "st_file_attributes", 0) & reparse_flag)
+    except OSError:
+        return True
 
 
 class ArtifactDownloader:
@@ -60,12 +104,11 @@ class ArtifactDownloader:
                 f"Asset has no supported checksum for target '{target.id}'"
             ) from None
 
-        try:
-            target.destination.directory.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            raise DownloadError(
-                f"Could not create destination directory for target '{target.id}'"
-            ) from None
+        version_directory = final_path.parent
+        self._create_safe_version_directory(version_directory, target)
+        existing = self._existing_result(final_path, asset, target)
+        if existing is not None:
+            return existing
 
         auth = None
         if target.auth.username is not None and target.auth.password is not None:
@@ -100,7 +143,7 @@ class ArtifactDownloader:
             try:
                 temporary_file = tempfile.NamedTemporaryFile(
                     mode="w+b",
-                    dir=target.destination.directory,
+                    dir=version_directory,
                     prefix=f".{asset.filename}.",
                     suffix=".download.tmp",
                     delete=False,
@@ -169,10 +212,21 @@ class ArtifactDownloader:
                     retryable=True,
                 )
             try:
-                os.replace(temporary_path, final_path)
+                os.link(temporary_path, final_path)
+            except FileExistsError:
+                winner = self._existing_result(final_path, asset, target)
+                if winner is None:
+                    raise DownloadError(f"Artifact publication conflict for target '{target.id}'")
+                return winner
             except OSError:
                 raise DownloadError(
-                    f"Could not atomically deploy artifact for target '{target.id}'"
+                    f"Could not publish artifact without overwriting for target '{target.id}'"
+                ) from None
+            try:
+                temporary_path.unlink()
+            except OSError:
+                raise DownloadError(
+                    f"Could not remove owned temporary file for target '{target.id}'"
                 ) from None
             temporary_path = None
             return DownloadResult(
@@ -195,6 +249,7 @@ class ArtifactDownloader:
 
     @staticmethod
     def _validated_final_path(asset: NexusAsset, target: TargetConfig) -> Path:
+        version = _safe_component(asset.version, "artifact version", target.id)
         filename = asset.filename
         if (
             not isinstance(filename, str)
@@ -217,11 +272,68 @@ class ArtifactDownloader:
             raise DownloadError(
                 f"Artifact filename does not match target '{target.id}' coordinates"
             )
+        _safe_component(filename, "artifact filename", target.id)
         destination = target.destination.directory.resolve(strict=False)
-        final_path = destination / filename
-        if final_path.resolve(strict=False).parent != destination:
+        version_directory = destination / version
+        final_path = version_directory / filename
+        if version_directory.parent != destination or final_path.parent != version_directory:
             raise DownloadError(f"Unsafe artifact filename for target '{target.id}'")
         return final_path
+
+    def final_path(self, asset: NexusAsset, target: TargetConfig) -> Path:
+        """Return the validated versioned deployment path without filesystem changes."""
+        return self._validated_final_path(asset, target)
+
+    @staticmethod
+    def _create_safe_version_directory(version_directory: Path, target: TargetConfig) -> None:
+        base = version_directory.parent
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            if _unsafe_existing_path(base) or not base.is_dir():
+                raise OSError
+            version_directory.mkdir(exist_ok=True)
+            if _unsafe_existing_path(version_directory) or not version_directory.is_dir():
+                raise OSError
+            if version_directory.resolve(strict=True).parent != base.resolve(strict=True):
+                raise OSError
+        except OSError:
+            raise DownloadError(
+                f"Could not create destination/version directory for target '{target.id}'"
+            ) from None
+
+    @staticmethod
+    def _existing_result(
+        final_path: Path, asset: NexusAsset, target: TargetConfig
+    ) -> DownloadResult | None:
+        try:
+            exists = final_path.exists() or final_path.is_symlink()
+        except OSError:
+            exists = True
+        if not exists:
+            return None
+        if _unsafe_existing_path(final_path) or not final_path.is_file():
+            raise DownloadError(f"Unsafe existing artifact path for target '{target.id}'")
+        algorithm, expected = asset.canonical_checksum
+        try:
+            digest = hashlib.new(algorithm)
+            size = 0
+            with final_path.open("rb") as artifact_file:
+                for chunk in iter(lambda: artifact_file.read(ArtifactDownloader.CHUNK_SIZE), b""):
+                    digest.update(chunk)
+                    size += len(chunk)
+        except OSError:
+            raise DownloadError(f"Could not verify existing artifact for target '{target.id}'") from None
+        actual = digest.hexdigest()
+        if not hmac.compare_digest(actual, expected):
+            raise DownloadError(f"Artifact checksum conflict for target '{target.id}'")
+        return DownloadResult(
+            path=final_path,
+            filename=asset.filename,
+            bytes_written=size,
+            checksum_algorithm=algorithm,
+            checksum=actual,
+            disposition=DownloadDisposition.REUSED,
+        )
 
     @staticmethod
     def _validate_response(response: Any, target: TargetConfig) -> None:

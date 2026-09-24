@@ -26,10 +26,9 @@ defaults:
     extension: "jar"
     classifier: null
 
-  target:
-    keep_previous_versions: 1
-
 targets:
+# Every required Nexus file is an independent target. Matching versions below
+# share the same base/version directory without being grouped transactionally.
   - id: "example-application"
     enabled: true
     nexus:
@@ -40,25 +39,23 @@ targets:
     destination:
       directory: "artifacts/sample-application"
 
-  - id: "example-library"
+  - id: "example-application-dependencies"
     enabled: true
     nexus:
-      url: "https://nexus-two.example.invalid"
-      repository: "tools-releases"
-      group_id: "org.example.tools"
-      artifact_id: "tools-bundle"
+      url: "https://nexus-one.example.invalid"
+      repository: "sample-releases"
+      group_id: "org.example.sample"
+      artifact_id: "sample-application"
     auth:
       username_env: "LIBRARY_NEXUS_USERNAME"
       password_env: "LIBRARY_NEXUS_PASSWORD"
     artifact:
-      classifier: "all"
+      classifier: "dependencies"
     network:
       timeout_seconds: 10
       retries: 1
     destination:
-      directory: "artifacts/tools-bundle"
-    target:
-      keep_previous_versions: 2
+      directory: "artifacts/sample-application"
 
   - id: "example-disabled"
     enabled: false

@@ -36,7 +36,6 @@ def test_valid_single_target_uses_built_in_defaults(tmp_path: Path) -> None:
     assert loaded.enabled is True
     assert loaded.artifact.extension == "jar"
     assert loaded.artifact.classifier is None
-    assert loaded.retention.keep_previous_versions == 1
     assert config.logging.level == "INFO"
     assert config.logging.file == Path("logs/nexus-jar-sync.log")
     assert config.logging.max_file_size_mb == 5

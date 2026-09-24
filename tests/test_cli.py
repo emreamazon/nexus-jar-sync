@@ -95,7 +95,7 @@ def test_cli_exit_codes_summary_order_and_dry_run(
     positions = [output.index(f"target-{index}") for index in range(len(statuses))]
     assert positions == sorted(positions)
     assert f"Failed: {sum(status is TargetSyncStatus.FAILED for status in statuses)}" in output
-    assert ("No artifact, destination, retention, or state changes were made." in output) is dry_run
+    assert ("No artifact, destination, or state changes were made." in output) is dry_run
 
 
 def test_invalid_configuration_exits_two_before_logging_or_service(tmp_path: Path, capsys) -> None:
