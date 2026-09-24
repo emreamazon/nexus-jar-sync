@@ -130,7 +130,7 @@ def test_windows_argument_value_for_config_path_with_spaces() -> None:
     command = (
         "$resolvedConfig='C:\\Path With Spaces\\config.yaml';"
         f"{assignment};"
-        "[Console]::Out.Write($arguments)"
+        "Write-Output -NoEnumerate $arguments"
     )
     completed = subprocess.run(
         [executable, "-NoProfile", "-NonInteractive", "-Command", command],
@@ -139,7 +139,9 @@ def test_windows_argument_value_for_config_path_with_spaces() -> None:
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
-    assert completed.stdout == '-m nexus_jar_sync.main --config "C:\\Path With Spaces\\config.yaml"'
+    assert completed.stdout == (
+        '-m nexus_jar_sync.main --config "C:\\Path With Spaces\\config.yaml"\n'
+    )
 
 
 def test_windows_credentials_are_not_embedded_or_plaintext_parameters() -> None:
