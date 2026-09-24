@@ -1,6 +1,5 @@
-# Portable relative-path example. Platform-specific examples are alongside this file.
-# Copy one example to config/config.yaml and replace the placeholder values.
-# Credentials are read from environment variables and must never be placed here.
+# Safe Windows example. Copy to config.yaml and replace every placeholder.
+# Credential values belong in the named environment variables, never in YAML.
 logging:
   level: "INFO"
   file: "logs/nexus-jar-sync.log"
@@ -17,30 +16,27 @@ defaults:
     retry_delay_seconds: 5
     verify_tls: true
     ca_bundle: null
-
   auth:
     username_env: "NEXUS_USERNAME"
     password_env: "NEXUS_PASSWORD"
-
   artifact:
     extension: "jar"
     classifier: null
-
   target:
     keep_previous_versions: 1
 
 targets:
-  - id: "example-application"
+  - id: "sample-application"
     enabled: true
     nexus:
-      url: "https://nexus-one.example.invalid/"
+      url: "https://nexus-one.example.invalid"
       repository: "sample-releases"
       group_id: "org.example.sample"
       artifact_id: "sample-application"
     destination:
-      directory: "artifacts/sample-application"
+      directory: "C:/NexusJarSync/artifacts/application"
 
-  - id: "example-library"
+  - id: "sample-tools-bundle"
     enabled: true
     nexus:
       url: "https://nexus-two.example.invalid"
@@ -48,19 +44,19 @@ targets:
       group_id: "org.example.tools"
       artifact_id: "tools-bundle"
     auth:
-      username_env: "LIBRARY_NEXUS_USERNAME"
-      password_env: "LIBRARY_NEXUS_PASSWORD"
+      username_env: "TOOLS_NEXUS_USERNAME"
+      password_env: "TOOLS_NEXUS_PASSWORD"
     artifact:
       classifier: "all"
     network:
-      timeout_seconds: 10
+      timeout_seconds: 15
       retries: 1
     destination:
-      directory: "artifacts/tools-bundle"
+      directory: "D:/ManagedJars/tools"
     target:
-      keep_previous_versions: 2
+      keep_previous_versions: 3
 
-  - id: "example-disabled"
+  - id: "sample-disabled"
     enabled: false
     nexus:
       url: "https://nexus-one.example.invalid"
@@ -68,4 +64,4 @@ targets:
       group_id: "org.example.optional"
       artifact_id: "optional-component"
     destination:
-      directory: "artifacts/optional-component"
+      directory: "C:/NexusJarSync/artifacts/optional"

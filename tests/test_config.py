@@ -277,8 +277,8 @@ def test_example_configuration_parses(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(name, "fake-test-value")
     path = Path(__file__).parents[1] / "config" / "config.example.yaml"
     config = load_config(path)
-    assert len(config.targets) == 2
-    assert len(config.enabled_targets) == 1
+    assert len(config.targets) == 3
+    assert len(config.enabled_targets) == 2
     assert config.logging.level == "INFO"
     assert config.logging.file == Path("logs/nexus-jar-sync.log")
     assert config.state.directory == Path("data/state")

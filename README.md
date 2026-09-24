@@ -66,7 +66,11 @@ The application always performs one synchronization pass and exits. Scheduling f
 
 Run one manual dry-run and one manual active run as the intended scheduler account before installation. That account must be able to read its configured credential environment variables and access Nexus, configuration, destinations, state, logs, and any CA bundle. The supplied examples set an explicit working directory and prevent overlapping invocations.
 
-Portable/offline deployment packaging is deferred to M11.
+Headless scheduling is supplied by M10; portable/offline deployment packaging is supplied by M11.
+
+## Offline deployment
+
+M11 provides a platform-specific wheelhouse bundle builder, integrity manifest, strict offline installers, and aligned Windows/Linux multi-JAR examples. See the [offline deployment guide](deployment/offline/README.md). Build bundles on a connected host compatible with the offline destination; Python 3.12+ must already be installed on the destination.
 
 Run the tests with:
 
