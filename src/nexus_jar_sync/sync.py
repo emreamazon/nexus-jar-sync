@@ -122,7 +122,10 @@ class SyncService:
                 target_root = output_root / _safe_test_target_id(target.id)
                 download = self._retry.run(
                     lambda: self._release_assembler.assemble(
-                        asset, target, config.tools, destination_base=target_root
+                        asset, target, config.tools, destination_base=target_root,
+                        secondary_resolver=lambda artifact_id: self._resolve_secondary(
+                            target, asset.version, artifact_id
+                        ),
                     ),
                     retries=target.network.retries,
                     retry_delay_seconds=target.network.retry_delay_seconds,
@@ -185,7 +188,14 @@ class SyncService:
                     message=f"Would update to version {asset.version}",
                 )
             download = self._retry.run(
-                lambda: self._release_assembler.assemble(asset, target, self._config.tools)
+                lambda: self._release_assembler.assemble(
+                    asset,
+                    target,
+                    self._config.tools,
+                    secondary_resolver=lambda artifact_id: self._resolve_secondary(
+                        target, asset.version, artifact_id
+                    ),
+                )
                 if self._release_assembler is not None
                 else self._downloader.download(asset, target),
                 retries=target.network.retries,
@@ -243,6 +253,17 @@ class SyncService:
                 change=change,
                 message=str(error),
             )
+
+    def _resolve_secondary(
+        self, target: TargetConfig, version: str, artifact_id: str
+    ) -> NexusAsset:
+        return self._retry.run(
+            lambda: self._nexus_client.get_asset_at_version(target, artifact_id, version),
+            retries=target.network.retries,
+            retry_delay_seconds=target.network.retry_delay_seconds,
+            operation_name="secondary artifact discovery",
+            target_id=target.id,
+        )
 
     @staticmethod
     def _validate_download_result(

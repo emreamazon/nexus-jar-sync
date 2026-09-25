@@ -58,9 +58,10 @@ def test_offline_install_is_strict_and_existing_environment_is_never_overwritten
 
 def test_existing_configuration_is_preserved_and_credentials_are_status_only() -> None:
     value = text(HELPER)
-    assert "Copy-Item -LiteralPath" in value
+    assert "[IO.File]::Replace($configOutput,$config,$backup)" in value
     assert "Existing configuration preserved" in value
-    assert "Continue with this existing configuration?" in value
+    assert "Back up and replace the existing configuration?" in value
+    assert "existing configuration validation" in value
     assert "PROCESS=$(if($process){'SET'}else{'MISSING'})" in value
     assert "USER=$(if($user){'SET'}else{'MISSING'})" in value
     assert "MACHINE=$(if($machine){'SET'}else{'MISSING'})" in value

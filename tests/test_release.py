@@ -15,7 +15,7 @@ import requests
 
 from nexus_jar_sync.config import (
     ArtifactConfig, AuthConfig, CompanionConfig, DestinationConfig, NetworkConfig,
-    NexusConfig, TargetConfig, ToolsConfig,
+    NexusConfig, ReleaseArtifactConfig, TargetConfig, ToolsConfig,
 )
 from nexus_jar_sync.downloader import ArtifactDownloader, DownloadDisposition, DownloadError
 from nexus_jar_sync.nexus_client import NexusAsset
@@ -94,6 +94,15 @@ def asset(version: str = "1.0", content: bytes = PRIMARY) -> NexusAsset:
     return NexusAsset(version, filename, f"https://nexus.example.invalid/{filename}", f"org/example/{version}/{filename}", {"sha256": hashlib.sha256(content).hexdigest()})
 
 
+def artifact_asset(artifact_id: str, version: str, content: bytes) -> NexusAsset:
+    filename = f"{artifact_id}-{version}.jar"
+    return NexusAsset(
+        version, filename, f"https://nexus.example.invalid/{filename}",
+        f"org/example/{artifact_id}/{version}/{filename}",
+        {"sha256": hashlib.sha256(content).hexdigest()},
+    )
+
+
 def assembler(primary: Session, companions: Session, runner: SevenZip) -> ReleaseAssembler:
     return ReleaseAssembler(ArtifactDownloader(primary), companions, command_runner=runner)
 
@@ -125,6 +134,83 @@ def test_complete_release_is_published_then_reused_without_companion_get_or_7z(t
     assert len(primary.calls) == 1
     assert len(companion.calls) == 2
     assert len(seven_zip.calls) == 2
+
+
+def test_primary_version_publishes_four_maven_artifacts_atomically_and_reuses(
+    tmp_path: Path,
+) -> None:
+    bodies = {
+        "windows-obs": b"windows obs", "linux-versions": b"linux",
+        "linux-obs": b"linux obs",
+    }
+    configured = replace(
+        target(tmp_path / "destination"),
+        nexus=NexusConfig("https://nexus.example.invalid", "releases", "org.example", "windows-versions"),
+        companions=(),
+        release_artifacts=(
+            ReleaseArtifactConfig("windows-obfuscated", "windows-obs"),
+            ReleaseArtifactConfig("linux", "linux-versions"),
+            ReleaseArtifactConfig("linux-obfuscated", "linux-obs"),
+        ),
+    )
+    primary_body = b"windows versions"
+    selected = artifact_asset("windows-versions", "1.76.0", primary_body)
+    downloads = Session([Response(primary_body), *(Response(body) for body in bodies.values())])
+    release = assembler(downloads, Session([]), SevenZip())
+    resolved: list[str] = []
+
+    def resolve(artifact_id: str) -> NexusAsset:
+        resolved.append(artifact_id)
+        return artifact_asset(artifact_id, "1.76.0", bodies[artifact_id])
+
+    first = release.assemble(selected, configured, ToolsConfig(), secondary_resolver=resolve)
+    root = first.path.parent
+    assert sorted(path.name for path in root.glob("*.jar")) == [
+        "linux-obs-1.76.0.jar", "linux-versions-1.76.0.jar",
+        "windows-obs-1.76.0.jar", "windows-versions-1.76.0.jar",
+    ]
+    metadata = json.loads((root / METADATA_NAME).read_text(encoding="utf-8"))
+    assert [item["role"] for item in metadata["artifacts"]] == [
+        "primary", "secondary", "secondary", "secondary"
+    ]
+    assert sum(item["role"] in {"primary", "secondary"} for item in metadata["files"]) == 4
+    timestamps = {path: path.stat().st_mtime_ns for path in root.iterdir()}
+    second = release.assemble(
+        selected, configured, ToolsConfig(),
+        secondary_resolver=lambda artifact_id: pytest.fail("unchanged release resolved secondary"),
+    )
+    assert second.disposition is DownloadDisposition.REUSED
+    assert resolved == ["windows-obs", "linux-versions", "linux-obs"]
+    assert timestamps == {path: path.stat().st_mtime_ns for path in root.iterdir()}
+
+
+def test_secondary_failure_never_publishes_partial_release(tmp_path: Path) -> None:
+    configured = replace(
+        target(tmp_path / "destination"), companions=(),
+        release_artifacts=(ReleaseArtifactConfig("missing", "missing-artifact"),),
+    )
+    with pytest.raises(DownloadError, match="missing secondary"):
+        assembler(Session([Response(PRIMARY)]), Session([]), SevenZip()).assemble(
+            asset(), configured, ToolsConfig(),
+            secondary_resolver=lambda artifact_id: (_ for _ in ()).throw(DownloadError("missing secondary")),
+        )
+    assert not (tmp_path / "destination" / "1.0").exists()
+
+
+def test_secondary_tampering_invalidates_completed_release(tmp_path: Path) -> None:
+    configured = replace(
+        target(tmp_path / "destination"), companions=(),
+        release_artifacts=(ReleaseArtifactConfig("secondary", "other"),),
+    )
+    release = assembler(Session([Response(PRIMARY), Response(b"secondary")]), Session([]), SevenZip())
+    release.assemble(
+        asset(), configured, ToolsConfig(),
+        secondary_resolver=lambda artifact_id: artifact_asset(artifact_id, "1.0", b"secondary"),
+    )
+    secondary = tmp_path / "destination" / "1.0" / "other-1.0.jar"
+    secondary.write_bytes(b"tampered")
+    with pytest.raises(DownloadError, match="integrity"):
+        release.assemble(asset(), configured, ToolsConfig(), secondary_resolver=lambda _: pytest.fail())
 
 
 def test_new_primary_version_downloads_fresh_companions_and_retains_old_release(tmp_path: Path) -> None:
@@ -232,6 +318,49 @@ def test_sync_primary_only_trigger_saves_state_after_complete_release(tmp_path: 
     assert state.metadata_path == str((tmp_path / "destination" / "1.0" / METADATA_NAME).resolve())
 
 
+def test_sync_resolves_secondaries_only_for_new_primary_and_saves_state_last(tmp_path: Path) -> None:
+    bodies = {"one": b"one", "two": b"two", "three": b"three"}
+
+    class Client:
+        def __init__(self) -> None:
+            self.secondary_calls: list[tuple[str, str]] = []
+
+        def get_latest_asset(self, configured: TargetConfig) -> NexusAsset:
+            return asset("4.0", PRIMARY)
+
+        def get_asset_at_version(
+            self, configured: TargetConfig, artifact_id: str, version: str
+        ) -> NexusAsset:
+            self.secondary_calls.append((artifact_id, version))
+            return artifact_asset(artifact_id, version, bodies[artifact_id])
+
+    client = Client()
+    configured = replace(
+        target(tmp_path / "destination"), companions=(),
+        release_artifacts=(
+            ReleaseArtifactConfig("one", "one"), ReleaseArtifactConfig("two", "two"),
+            ReleaseArtifactConfig("three", "three"),
+        ),
+    )
+    downloads = Session([Response(PRIMARY), Response(b"one"), Response(b"two"), Response(b"three")])
+    primary = ArtifactDownloader(downloads)
+    service = SyncService(
+        nexus_client=client,  # type: ignore[arg-type]
+        downloader=primary,
+        release_assembler=ReleaseAssembler(primary, Session([]), command_runner=SevenZip()),
+        retry_executor=RetryExecutor(sleep=lambda seconds: None),
+        state_store_factory=StateStore,
+    )
+    from nexus_jar_sync.config import AppConfig, StateConfig
+    config = AppConfig((configured,), state=StateConfig(tmp_path / "state"))
+    assert service.run(config).results[0].status is TargetSyncStatus.UPDATED
+    assert service.run(config).results[0].status is TargetSyncStatus.CURRENT
+    assert client.secondary_calls == [("one", "4.0"), ("two", "4.0"), ("three", "4.0")]
+    assert len(downloads.calls) == 4
+    state = StateStore(tmp_path / "state").load(configured.id)
+    assert state is not None and state.version == "4.0"
+
+
 def test_isolated_test_download_ignores_state_and_writes_only_under_test_root(tmp_path: Path) -> None:
     class Client:
         def get_latest_asset(self, configured: TargetConfig) -> NexusAsset:
@@ -296,6 +425,57 @@ def test_keep_archive_false_omits_only_staged_archive(tmp_path: Path) -> None:
         "application-1.0.jar", "lib/dependency.jar"
     ]
     assert [item["role"] for item in metadata["files"]] == ["primary", "extracted"]
+
+
+@pytest.mark.parametrize("keep_archive", [True, False])
+def test_strip_single_root_publishes_only_wrapper_children(
+    tmp_path: Path, keep_archive: bool
+) -> None:
+    class WrapperSevenZip(SevenZip):
+        def __call__(self, command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            self.calls.append((command, kwargs))
+            if command[1] == "l":
+                return subprocess.CompletedProcess(command, 0, "Path = wrapper/lib/dependency.jar\n", "")
+            output = Path(next(item[2:] for item in command if item.startswith("-o")))
+            (output / "wrapper" / "lib").mkdir(parents=True)
+            (output / "wrapper" / "lib" / "dependency.jar").write_bytes(b"dependency")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+    companion = replace(
+        target(tmp_path).companions[0], keep_archive=keep_archive, strip_single_root=True
+    )
+    configured = replace(target(tmp_path / "destination"), companions=(companion,))
+    assembler(Session([Response(PRIMARY)]), Session([Response(ARCHIVE)]), WrapperSevenZip()).assemble(
+        asset(), configured, ToolsConfig(Path("7z.exe"), 30)
+    )
+    root = tmp_path / "destination" / "1.0"
+    assert (root / "lib" / "dependency.jar").read_bytes() == b"dependency"
+    assert not (root / "wrapper").exists()
+    assert (root / "dependencies.7z").exists() is keep_archive
+
+
+@pytest.mark.parametrize("shape", ["siblings", "file", "empty"])
+def test_strip_single_root_rejects_invalid_top_level_shape(tmp_path: Path, shape: str) -> None:
+    class InvalidWrapper(SevenZip):
+        def __call__(self, command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if command[1] == "l":
+                return subprocess.CompletedProcess(command, 0, "Path = wrapper/file.txt\n", "")
+            output = Path(next(item[2:] for item in command if item.startswith("-o")))
+            if shape == "file":
+                output.mkdir(exist_ok=True); (output / "file.txt").write_text("x")
+            else:
+                (output / "wrapper").mkdir(parents=True)
+                if shape == "siblings":
+                    (output / "other").mkdir()
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+    companion = replace(target(tmp_path).companions[0], strip_single_root=True)
+    configured = replace(target(tmp_path / "destination"), companions=(companion,))
+    with pytest.raises(DownloadError, match="wrapper"):
+        assembler(Session([Response(PRIMARY)]), Session([Response(ARCHIVE)]), InvalidWrapper()).assemble(
+            asset(), configured, ToolsConfig(Path("7z.exe"), 30)
+        )
+    assert not (tmp_path / "destination" / "1.0").exists()
 
 
 @pytest.mark.parametrize("mutation", ["removed", "modified", "unexpected"])

@@ -158,6 +158,7 @@ def populate_stage(stage: Path, source_root: Path, wheelhouse: Path, version: st
     shutil.copy2(offline / "install-offline.sh", stage / "install-offline.sh")
     shutil.copy2(offline / "setup-windows.bat", stage / "setup-windows.bat")
     shutil.copy2(offline / "setup-windows.ps1", tools / "setup-windows.ps1")
+    shutil.copy2(offline / "generate_windows_config.py", tools / "generate_windows_config.py")
     write_metadata(stage, source_root, version)
     (stage / BUNDLE_MARKER).unlink()
     write_manifest(stage)

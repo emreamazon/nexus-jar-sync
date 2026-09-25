@@ -133,6 +133,19 @@ def test_endpoint_query_auth_and_network_options_are_passed() -> None:
     assert options["verify"] is False
 
 
+def test_secondary_asset_is_resolved_at_exact_primary_version() -> None:
+    item = asset_item(
+        "2.0", path="com/example/windows-obs/2.0/windows-obs-2.0.jar"
+    )
+    item["maven2"]["artifactId"] = "windows-obs"
+    session = FakeSession(page(item))
+    resolved = NexusClient(session).get_asset_at_version(make_target(), "windows-obs", "2.0")
+    assert resolved.version == "2.0"
+    assert resolved.filename == "windows-obs-2.0.jar"
+    assert session.calls[0][1]["params"]["version"] == "2.0"
+    assert session.calls[0][1]["params"]["maven.artifactId"] == "windows-obs"
+
+
 def test_no_auth_tuple_when_credentials_are_absent() -> None:
     session = FakeSession(page(asset_item()))
     NexusClient(session).get_latest_asset(make_target())

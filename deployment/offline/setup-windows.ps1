@@ -11,9 +11,13 @@ $ErrorActionPreference="Stop"; $script:SetupLog=$null
 function Write-Phase([string]$Name){ Write-Host "`n=== $Name ==="; Write-SafeLog "PHASE: $Name" }
 function Write-SafeLog([string]$Message){ if($script:SetupLog){ Add-Content -LiteralPath $script:SetupLog -Value "[$([DateTime]::UtcNow.ToString('o'))] $Message" -Encoding UTF8 } }
 function Confirm-Step([string]$Prompt){ if($PlanOnly){return $false}; (Read-Host "$Prompt [y/N]").Trim().ToUpperInvariant() -eq "Y" }
+function Resolve-FullPathField([object]$Value,[string]$Field){
+    if($Value -isnot [string] -or [string]::IsNullOrWhiteSpace($Value) -or $Value -match '[\x00-\x1f]'){throw "$Field is not a valid single path value."}
+    try{return [IO.Path]::GetFullPath([string]$Value)}catch{throw "$Field is not a valid path."}
+}
 function Resolve-SafeRoot([string]$Value){
-    $candidate=[IO.Path]::GetFullPath($Value); $trimmed=$candidate.TrimEnd('\')
-    $profile=[IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd('\'); $bundle=[IO.Path]::GetFullPath($BundleRoot).TrimEnd('\')
+    $candidate=Resolve-FullPathField $Value 'Installation root'; $trimmed=$candidate.TrimEnd('\')
+    $profile=(Resolve-FullPathField $env:USERPROFILE 'User profile').TrimEnd('\'); $bundle=(Resolve-FullPathField $BundleRoot 'Bundle root').TrimEnd('\')
     $root=[IO.Path]::GetPathRoot($candidate).TrimEnd('\')
     if($trimmed -eq $root -or $trimmed -eq $profile -or $trimmed -eq $bundle){throw "Installation root is too broad or conflicts with the bundle/user profile."}
     if($trimmed.StartsWith($bundle+'\',[StringComparison]::OrdinalIgnoreCase)){throw "Installation root must be outside the extracted bundle."}; $trimmed
@@ -45,11 +49,13 @@ function Resolve-SevenZip([string]$Override,[string]$ConfigPath){
     $fromPath=Get-Command 7z.exe -ErrorAction SilentlyContinue|Select-Object -ExpandProperty Source -First 1
     foreach($item in @($Override,(Get-ConfiguredSevenZip $ConfigPath),(Join-Path $env:ProgramFiles '7-Zip\7z.exe'),$fromPath)|Where-Object{$_}){
         if([string]$item -match '[\x00-\x1f;|&><]'){if($item -eq $Override){throw "The 7-Zip executable path is unsafe."};continue}
-        try{$full=[IO.Path]::GetFullPath([string]$item)}catch{if($item -eq $Override){throw "The 7-Zip executable path is invalid."};continue}
+        try{$full=Resolve-FullPathField $item '7-Zip executable'}catch{if($item -eq $Override){throw};continue}
         if(-not[IO.Path]::IsPathFullyQualified($full)-or-not(Test-Path -LiteralPath $full -PathType Leaf)){if($item -eq $Override){throw "The specified 7-Zip executable does not exist."};continue}
         $file=Get-Item -LiteralPath $full -Force; if(($file.Attributes-band[IO.FileAttributes]::ReparsePoint)-ne 0){if($item -eq $Override){throw "The 7-Zip executable must not be a reparse point."};continue}
         & $file.FullName @('i') *> $null; if($LASTEXITCODE -eq 0){return $file.FullName}; if($item -eq $Override){throw "The specified 7-Zip executable failed its version check."}
-    }; throw "7z.exe was not found. Supply -SevenZipExecutable or configure an approved absolute path."
+    }
+    if(-not$PlanOnly){$entered=Read-Host "Absolute path to approved 7z.exe";if($entered){return Resolve-SevenZip $entered $ConfigPath}}
+    throw "7z.exe was not found. Supply -SevenZipExecutable or configure an approved absolute path."
 }
 function Test-Environment([string]$Python,[string]$Version){
     if(-not(Test-Path -LiteralPath $Python -PathType Leaf)){return $false}; & $Python -c "import importlib.metadata as m; assert m.version('nexus-jar-sync')=='$Version'; assert any(e.name=='nexus-jar-sync' and e.value=='nexus_jar_sync.main:main' for e in m.entry_points(group='console_scripts'))" *> $null; $LASTEXITCODE -eq 0
@@ -57,7 +63,9 @@ function Test-Environment([string]$Python,[string]$Version){
 function Get-UniqueTestOutput([string]$Root){$p=Join-Path $Root 'test-downloads';New-Item -ItemType Directory -Path $p -Force|Out-Null;do{$c=Join-Path $p "run-$([DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss'))-$([Guid]::NewGuid().ToString('N').Substring(0,8))"}while(Test-Path -LiteralPath $c);$c}
 
 try{
-    $bundle=[IO.Path]::GetFullPath($BundleRoot).TrimEnd('\');$install=Resolve-SafeRoot $InstallationRoot
+    $bundle=(Resolve-FullPathField $BundleRoot 'Bundle root').TrimEnd('\')
+    if(-not$PlanOnly){$rootInput=Read-Host "Installation root [$InstallationRoot]";if($rootInput){$InstallationRoot=$rootInput}}
+    $install=Resolve-SafeRoot $InstallationRoot
     $manifest=Join-Path $bundle 'SHA256SUMS.json';$metadataPath=Join-Path $bundle 'BUILD-METADATA.json';$verifier=Join-Path $bundle 'tools\verify_manifest.py';$wheelhouse=Join-Path $bundle 'wheelhouse'
     if(-not(Test-Path -LiteralPath $manifest -PathType Leaf)-or-not(Test-Path -LiteralPath $verifier -PathType Leaf)){throw "Bundle manifest or verifier is missing."}
     Write-Phase "1 - Bundle verification";Invoke-Checked $PythonExecutable @($verifier,$bundle) "manifest verification"
@@ -80,9 +88,25 @@ try{
         catch{if((Test-Path -LiteralPath $privateVenv)-and(Test-Path -LiteralPath (Join-Path $privateVenv '.njs-setup-owned') -PathType Leaf)){Remove-Item -LiteralPath $privateVenv -Recurse -Force};throw}
     }
     Write-Phase "3 - Configuration preparation"
-    if(-not(Test-Path -LiteralPath $config)){New-Item -ItemType Directory -Path (Split-Path -Parent $config)-Force|Out-Null;Copy-Item -LiteralPath (Join-Path $bundle 'config\config.windows.example.yaml') -Destination $config;Write-Host "Edit primary coordinates, companion URLs, destination base, credential variable names, and set tools.seven_zip_executable to: $sevenZip";Start-Process notepad.exe -ArgumentList @($config)-Wait;if(-not(Confirm-Step "Have you saved and reviewed the configuration?")){exit 0}}
-    else{Write-Host "Existing configuration preserved: $config";if(-not(Confirm-Step "Continue with this existing configuration?")){exit 0}}
-    $configuredSevenZip=Get-ConfiguredSevenZip $config;if(-not$configuredSevenZip-or([IO.Path]::GetFullPath($configuredSevenZip)-ne[IO.Path]::GetFullPath($sevenZip))){throw "Configuration must reference the reviewed absolute 7-Zip executable path."}
+    $configOutput=$config;$replaceConfig=$false
+    if(Test-Path -LiteralPath $config){
+        Write-Host "Existing configuration preserved: $config"
+        Invoke-Checked $venvPython @('-c','from nexus_jar_sync.config import load_config;import sys;load_config(sys.argv[1])',$config) "existing configuration validation"
+        if(-not(Confirm-Step "Back up and replace the existing configuration?")){Write-Host "Using the validated existing configuration."}
+        else{$replaceConfig=$true;$configOutput="$config.new-$([Guid]::NewGuid().ToString('N').Substring(0,8))"}
+    }
+    if(-not(Test-Path -LiteralPath $config)-or$replaceConfig){
+        $nexusUrl=Read-Host "Nexus base URL";$repository=Read-Host "Repository";$groupId=Read-Host "Group ID";$primaryId=Read-Host "Primary artifact ID [windows-versions]";if(-not$primaryId){$primaryId='windows-versions'}
+        $windowsObs=Read-Host "Windows obfuscated artifact ID [windows-obs]";if(-not$windowsObs){$windowsObs='windows-obs'};$linuxVersions=Read-Host "Linux artifact ID [linux-versions]";if(-not$linuxVersions){$linuxVersions='linux-versions'};$linuxObs=Read-Host "Linux obfuscated artifact ID [linux-obs]";if(-not$linuxObs){$linuxObs='linux-obs'}
+        $destination=Read-Host "Absolute release destination";$dependenciesUrl=Read-Host "Dependencies direct URL";$licenseUrl=Read-Host "License direct URL";$caBundle=Read-Host "Optional absolute CA bundle path (blank for none)"
+        $allowHttp=$false;if(@($nexusUrl,$dependenciesUrl,$licenseUrl)|Where-Object{$_ -match '^http://'}){$allowHttp=Confirm-Step "HTTP has no transport integrity. Explicitly accept HTTP for this trusted internal environment?";if(-not$allowHttp){throw "HTTP use was not accepted."}}
+        $credentialArgs=@();if(Confirm-Step "Configure credential environment-variable names? (anonymous is the default)"){$userEnv=Read-Host "Username environment-variable name";$passwordEnv=Read-Host "Credential secret environment-variable name";$credentialArgs=@('--username-env',$userEnv,'--password-env',$passwordEnv)}
+        $generator=Join-Path $bundle 'tools\generate_windows_config.py';$generatorArgs=@($generator,'--output',$configOutput,'--nexus-url',$nexusUrl,'--repository',$repository,'--group-id',$groupId,'--primary-artifact-id',$primaryId,'--windows-obs',$windowsObs,'--linux-versions',$linuxVersions,'--linux-obs',$linuxObs,'--destination',$destination,'--dependencies-url',$dependenciesUrl,'--license-url',$licenseUrl,'--seven-zip',$sevenZip,'--log-file',$logPath,'--state-directory',(Join-Path $install 'data\state'))+$credentialArgs
+        if($caBundle){$generatorArgs+=@('--ca-bundle',$caBundle)};if($allowHttp){$generatorArgs+='--allow-http'}
+        Invoke-Checked $venvPython $generatorArgs "configuration generation"
+        if($replaceConfig){$backup="$config.backup-$([DateTime]::UtcNow.ToString('yyyyMMddHHmmss'))";[IO.File]::Replace($configOutput,$config,$backup);Write-Host "Original configuration backed up: $backup"}
+    }
+    $configuredSevenZip=Get-ConfiguredSevenZip $config;if(-not$configuredSevenZip-or((Resolve-FullPathField $configuredSevenZip 'Configured 7-Zip path')-ne(Resolve-FullPathField $sevenZip 'Reviewed 7-Zip path'))){throw "Configuration must reference the reviewed absolute 7-Zip executable path."}
     Write-Phase "4 - Credential readiness"
     $credentialJson=& $venvPython -c "import json,yaml,sys;d=yaml.safe_load(open(sys.argv[1],encoding='utf-8'));n=[];a=lambda x:[n.append(x.get(k)) for k in ('username_env','password_env') if x and x.get(k)];a(d.get('defaults',{}).get('auth'));[(a(t.get('auth')),[a(c.get('auth')) for c in t.get('companions',[])]) for t in d.get('targets',[])];print(json.dumps(sorted(set(x for x in n if x))))" $config;if($LASTEXITCODE-ne0){throw "Could not inspect credential variable names."}
     $missing=$false;$schedulerReady=$true;foreach($name in($credentialJson|ConvertFrom-Json)){$process=$null-ne[Environment]::GetEnvironmentVariable([string]$name,'Process');$user=$null-ne[Environment]::GetEnvironmentVariable([string]$name,'User');$machine=$null-ne[Environment]::GetEnvironmentVariable([string]$name,'Machine');Write-Host "$name : PROCESS=$(if($process){'SET'}else{'MISSING'}) USER=$(if($user){'SET'}else{'MISSING'}) MACHINE=$(if($machine){'SET'}else{'MISSING'})";if(-not$process){$missing=$true};if(-not($user-or$machine)){$schedulerReady=$false}}

@@ -74,6 +74,13 @@ class CompanionConfig:
     keep_archive: bool = True
     extract_to: Path = Path(".")
     auth: AuthConfig | None = None
+    strip_single_root: bool = False
+
+
+@dataclass(frozen=True)
+class ReleaseArtifactConfig:
+    id: str
+    artifact_id: str
 
 
 @dataclass(frozen=True)
@@ -99,6 +106,7 @@ class TargetConfig:
     auth: AuthConfig
     artifact: ArtifactConfig
     companions: tuple[CompanionConfig, ...] = ()
+    release_artifacts: tuple[ReleaseArtifactConfig, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -276,6 +284,13 @@ def _parse_target(
     auth_values = _merged_section(default_auth, raw, "auth", f"target '{target_id}'")
     artifact_values = _merged_section(default_artifact, raw, "artifact", f"target '{target_id}'")
     companions = _parse_companions(raw.get("companions", []), target_id, auth_values)
+    release_artifacts = _parse_release_artifacts(
+        raw.get("release_artifacts", []), target_id, nexus.artifact_id, artifact_values
+    )
+    companion_ids = {item.id for item in companions}
+    release_ids = {item.id for item in release_artifacts}
+    if companion_ids & release_ids:
+        raise ConfigError(f"Duplicate release member id for target '{target_id}'")
 
     return TargetConfig(
         id=target_id,
@@ -286,6 +301,7 @@ def _parse_target(
         auth=_parse_auth(auth_values, target_id),
         artifact=_parse_artifact(artifact_values, target_id),
         companions=companions,
+        release_artifacts=release_artifacts,
     )
 
 
@@ -313,7 +329,7 @@ def _parse_companions(
         raise ConfigError(f"'companions' must be a list for target '{target_id}'")
     result: list[CompanionConfig] = []
     seen: set[str] = set()
-    allowed = frozenset({"id", "url", "filename", "action", "keep_archive", "extract_to", "auth"})
+    allowed = frozenset({"id", "url", "filename", "action", "keep_archive", "extract_to", "auth", "strip_single_root"})
     for index, item in enumerate(value):
         raw = _mapping(item, f"Companion at index {index} for target '{target_id}'")
         _validate_allowed_keys(raw, allowed, f"companion in target '{target_id}'")
@@ -336,12 +352,47 @@ def _parse_companions(
         keep = raw.get("keep_archive", True)
         if not isinstance(keep, bool):
             raise ConfigError(f"'keep_archive' must be a boolean for target '{target_id}'")
+        strip_single_root = raw.get("strip_single_root", False)
+        if not isinstance(strip_single_root, bool):
+            raise ConfigError(f"'strip_single_root' must be a boolean for target '{target_id}'")
+        if strip_single_root and action != "extract_7z":
+            raise ConfigError(f"'strip_single_root' requires extract_7z for target '{target_id}'")
         extract_text = raw.get("extract_to", ".")
         if not isinstance(extract_text, str) or not _safe_relative_path(extract_text, allow_subdirectories=True):
             raise ConfigError(f"'extract_to' is unsafe for target '{target_id}'")
         auth_values = _merged_section(default_auth, raw, "auth", f"companion '{companion_id}'")
         auth = _parse_auth(auth_values, target_id) if "auth" in raw else None
-        result.append(CompanionConfig(companion_id, url, filename, action, keep, Path(extract_text), auth))
+        result.append(CompanionConfig(companion_id, url, filename, action, keep, Path(extract_text), auth, strip_single_root))
+    return tuple(result)
+
+
+def _parse_release_artifacts(
+    value: Any,
+    target_id: str,
+    primary_artifact_id: str,
+    artifact_values: Mapping[str, Any],
+) -> tuple[ReleaseArtifactConfig, ...]:
+    if not isinstance(value, list):
+        raise ConfigError(f"'release_artifacts' must be a list for target '{target_id}'")
+    result: list[ReleaseArtifactConfig] = []
+    seen_ids: set[str] = {"primary"}
+    seen_coordinates = {primary_artifact_id}
+    _parse_artifact(artifact_values, target_id)
+    for index, item in enumerate(value):
+        raw = _mapping(item, f"Release artifact at index {index} for target '{target_id}'")
+        _validate_allowed_keys(raw, frozenset({"id", "artifact_id"}), f"release artifact in target '{target_id}'")
+        artifact_id = _required_text(raw, "artifact_id", f"release artifact in target '{target_id}'")
+        release_id = _required_text(raw, "id", f"release artifact in target '{target_id}'")
+        if release_id in seen_ids:
+            raise ConfigError(f"Duplicate release artifact id '{release_id}' for target '{target_id}'")
+        if artifact_id in seen_coordinates:
+            raise ConfigError(f"Duplicate release artifact coordinates for target '{target_id}'")
+        # Inherited extension/classifier make distinct artifact IDs produce distinct filenames.
+        if not _safe_relative_path(artifact_id, allow_subdirectories=False):
+            raise ConfigError(f"Release artifact id is unsafe for target '{target_id}'")
+        seen_ids.add(release_id)
+        seen_coordinates.add(artifact_id)
+        result.append(ReleaseArtifactConfig(release_id, artifact_id))
     return tuple(result)
 
 

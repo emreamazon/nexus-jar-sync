@@ -40,7 +40,16 @@ targets:
       url: "https://nexus-one.example.invalid/"
       repository: "sample-releases"
       group_id: "org.example.sample"
-      artifact_id: "sample-application"
+      artifact_id: "windows-versions"
+    # Secondary artifacts inherit Nexus/auth/network/extension/classifier and
+    # are resolved at exactly the primary version; they never trigger releases.
+    release_artifacts:
+      - id: "windows-obfuscated"
+        artifact_id: "windows-obs"
+      - id: "linux"
+        artifact_id: "linux-versions"
+      - id: "linux-obfuscated"
+        artifact_id: "linux-obs"
     destination:
       directory: "artifacts/sample-application"
     companions:
@@ -48,8 +57,9 @@ targets:
         url: "https://nexus-one.example.invalid/repository/static/dependencies.7z"
         filename: "dependencies.7z"
         action: "extract_7z"
-        keep_archive: true
+        keep_archive: false
         extract_to: "."
+        strip_single_root: true
       - id: "license"
         url: "https://nexus-one.example.invalid/repository/static/license.txt"
         filename: "license.txt"

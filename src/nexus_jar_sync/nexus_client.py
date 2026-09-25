@@ -67,6 +67,18 @@ class NexusClient:
             self._session.close()
 
     def get_latest_asset(self, target: TargetConfig) -> NexusAsset:
+        return self._get_asset(target, exact_version=None)
+
+    def get_asset_at_version(self, target: TargetConfig, artifact_id: str, version: str) -> NexusAsset:
+        """Resolve one inherited-coordinate release artifact at the primary version."""
+        from dataclasses import replace
+
+        secondary_target = replace(
+            target, nexus=replace(target.nexus, artifact_id=artifact_id), release_artifacts=()
+        )
+        return self._get_asset(secondary_target, exact_version=version)
+
+    def _get_asset(self, target: TargetConfig, exact_version: str | None) -> NexusAsset:
         endpoint = f"{target.nexus.url}/service/rest/v1/search/assets"
         search_params = {
             "repository": target.nexus.repository,
@@ -76,6 +88,8 @@ class NexusClient:
         }
         if target.artifact.classifier is not None:
             search_params["maven.classifier"] = target.artifact.classifier
+        if exact_version is not None:
+            search_params["version"] = exact_version
 
         auth = None
         if target.auth.username is not None and target.auth.password is not None:
@@ -110,7 +124,8 @@ class NexusClient:
                     unsortable_versions += 1
                     continue
                 if candidate is not None:
-                    candidates.append(candidate)
+                    if exact_version is None or candidate.asset.version == exact_version:
+                        candidates.append(candidate)
 
             token = payload.get("continuationToken")
             if token is not None and not isinstance(token, str):
@@ -133,7 +148,11 @@ class NexusClient:
                 )
             raise NexusClientError(f"No matching asset found for target '{target.id}'")
 
-        newest_version = max(candidate.parsed_version for candidate in candidates)
+        newest_version = (
+            max(candidate.parsed_version for candidate in candidates)
+            if exact_version is None
+            else candidates[0].parsed_version
+        )
         newest = [candidate.asset for candidate in candidates if candidate.parsed_version == newest_version]
         selected = newest[0]
         for duplicate in newest[1:]:

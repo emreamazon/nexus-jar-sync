@@ -300,6 +300,41 @@ def test_companion_and_tools_configuration_is_typed(tmp_path: Path, monkeypatch:
     assert loaded.targets[0].companions[0].keep_archive is False
 
 
+def test_release_artifacts_and_wrapper_stripping_are_typed(tmp_path: Path) -> None:
+    value = {"tools": {"seven_zip_executable": "C:/7z.exe"}, "targets": [target(
+        release_artifacts=[
+            {"id": "windows-obfuscated", "artifact_id": "windows-obs"},
+            {"id": "linux", "artifact_id": "linux-versions"},
+            {"id": "linux-obfuscated", "artifact_id": "linux-obs"},
+        ],
+        companions=[{
+            "id": "deps", "url": "http://nexus.example.invalid/dependencies.7z",
+            "filename": "dependencies.7z", "action": "extract_7z",
+            "keep_archive": False, "strip_single_root": True,
+        }],
+    )]}
+    loaded = load_config(write_config(tmp_path, value)).targets[0]
+    assert [item.artifact_id for item in loaded.release_artifacts] == [
+        "windows-obs", "linux-versions", "linux-obs"
+    ]
+    assert loaded.companions[0].strip_single_root is True
+
+
+@pytest.mark.parametrize(
+    ("artifacts", "message"),
+    [
+        ([{"id": "same", "artifact_id": "one"}, {"id": "same", "artifact_id": "two"}], "Duplicate release artifact id"),
+        ([{"id": "duplicate-primary", "artifact_id": "application"}], "Duplicate release artifact coordinates"),
+        ([{"id": "one", "artifact_id": "other"}, {"id": "two", "artifact_id": "other"}], "Duplicate release artifact coordinates"),
+    ],
+)
+def test_duplicate_release_artifacts_are_rejected(
+    tmp_path: Path, artifacts: list[dict[str, str]], message: str
+) -> None:
+    with pytest.raises(ConfigError, match=message):
+        load_config(write_config(tmp_path, {"targets": [target(release_artifacts=artifacts)]}))
+
+
 @pytest.mark.parametrize("url", ["relative/file", "file:///tmp/x", "https:///missing", "https://user:pass@example.invalid/x"])
 def test_unsafe_companion_url_is_rejected(tmp_path: Path, url: str) -> None:
     with pytest.raises(ConfigError, match="Companion URL"):

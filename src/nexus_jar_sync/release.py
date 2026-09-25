@@ -38,6 +38,19 @@ class CompanionRecord:
     size: int
     archive_retained: bool
     extract_to: str | None
+    strip_single_root: bool
+
+
+@dataclass(frozen=True)
+class ArtifactRecord:
+    id: str
+    artifact_id: str
+    role: str
+    filename: str
+    checksum_algorithm: str
+    checksum: str
+    size: int
+    path: str
 
 
 class ReleaseAssembler:
@@ -69,6 +82,7 @@ class ReleaseAssembler:
         tools: ToolsConfig,
         *,
         destination_base: Path | None = None,
+        secondary_resolver: Callable[[str], NexusAsset] | None = None,
     ) -> DownloadResult:
         base = (destination_base or target.destination.directory).resolve(strict=False)
         final_primary = ArtifactDownloader._validated_final_path(
@@ -96,6 +110,36 @@ class ReleaseAssembler:
             )
             primary = self._primary.download(asset, staging_target)
             release_root = primary.path.parent
+            artifact_records = [
+                ArtifactRecord(
+                    "primary", target.nexus.artifact_id, "primary", asset.filename,
+                    primary.checksum_algorithm, primary.checksum, primary.bytes_written,
+                    asset.filename,
+                )
+            ]
+            roles = {asset.filename: "primary"}
+            for configured in target.release_artifacts:
+                if secondary_resolver is None:
+                    raise DownloadError(f"Secondary artifact resolver is unavailable for target '{target.id}'")
+                secondary_asset = secondary_resolver(configured.artifact_id)
+                if secondary_asset.version != asset.version:
+                    raise DownloadError(f"Secondary artifact version mismatch for target '{target.id}'")
+                if secondary_asset.filename in roles:
+                    raise DownloadError(f"Release artifact filename collision for target '{target.id}'")
+                secondary_target = replace(
+                    staging_target,
+                    nexus=replace(staging_target.nexus, artifact_id=configured.artifact_id),
+                    release_artifacts=(),
+                )
+                secondary = self._primary.download(secondary_asset, secondary_target)
+                roles[secondary_asset.filename] = "secondary"
+                artifact_records.append(
+                    ArtifactRecord(
+                        configured.id, configured.artifact_id, "secondary",
+                        secondary_asset.filename, secondary.checksum_algorithm,
+                        secondary.checksum, secondary.bytes_written, secondary_asset.filename,
+                    )
+                )
             records: list[CompanionRecord] = []
             for companion in target.companions:
                 archive, digest, size = self._download_companion(companion, target, release_root)
@@ -112,6 +156,7 @@ class ReleaseAssembler:
                         size,
                         companion.keep_archive,
                         companion.extract_to.as_posix() if companion.action == "extract_7z" else None,
+                        companion.strip_single_root,
                     )
                 )
             metadata = {
@@ -121,10 +166,10 @@ class ReleaseAssembler:
                 "primary_filename": asset.filename,
                 "primary_checksum_algorithm": primary.checksum_algorithm,
                 "primary_checksum": primary.checksum,
+                "artifacts": [asdict(record) for record in artifact_records],
                 "companions": [asdict(record) for record in records],
                 "completed_at": self._aware_timestamp().isoformat(),
             }
-            roles = {asset.filename: "primary"}
             roles.update(
                 {
                     companion.filename: "companion"
@@ -269,14 +314,33 @@ class ReleaseAssembler:
                 [str(executable), "x", str(archive), f"-o{scratch}", "-y"], tools, target
             )
             _validate_tree(scratch, target.id)
+            merge_root = scratch
+            if companion.strip_single_root:
+                top_level = list(scratch.iterdir())
+                if len(top_level) != 1 or not top_level[0].is_dir():
+                    raise DownloadError(f"Archive must contain one wrapper directory for target '{target.id}'")
+                merge_root = top_level[0]
+                if not any(merge_root.iterdir()):
+                    raise DownloadError(f"Archive wrapper directory is empty for target '{target.id}'")
             destination = release_root if companion.extract_to == Path(".") else release_root / companion.extract_to
             try:
                 destination.mkdir(parents=True, exist_ok=True)
             except OSError:
                 raise DownloadError(f"Extraction collision for target '{target.id}'") from None
-            for source in sorted(scratch.rglob("*"), key=lambda path: (len(path.parts), path.as_posix())):
-                relative = source.relative_to(scratch)
+            existing = {
+                path.relative_to(release_root).as_posix().casefold()
+                for path in release_root.rglob("*")
+                if path != destination
+            }
+            planned: set[str] = set()
+            sources = sorted(merge_root.rglob("*"), key=lambda path: (len(path.parts), path.as_posix()))
+            for source in sources:
+                relative = source.relative_to(merge_root)
                 target_path = destination / relative
+                collision_key = target_path.relative_to(release_root).as_posix().casefold()
+                if collision_key in existing or collision_key in planned:
+                    raise DownloadError(f"Extraction collision for target '{target.id}'")
+                planned.add(collision_key)
                 if target_path.resolve(strict=False).is_relative_to(release_root.resolve(strict=True)) is False:
                     raise DownloadError(f"Unsafe extracted path for target '{target.id}'")
                 if source.is_dir():
@@ -349,6 +413,7 @@ class ReleaseAssembler:
                 or metadata.get("primary_checksum") != expected
             ):
                 raise DownloadError(f"Artifact checksum conflict for target '{target.id}'")
+            _validate_artifact_records(metadata, target, asset)
             actual = _hash_file(primary_path, algorithm)
             if actual != expected:
                 raise DownloadError(f"Artifact checksum conflict for target '{target.id}'")
@@ -365,6 +430,15 @@ class ReleaseAssembler:
                 item = recorded[relative]
                 if path.stat().st_size != item["size"] or _hash_file(path, "sha256") != item["sha256"]:
                     raise DownloadError(f"Release file integrity check failed for target '{target.id}'")
+            for artifact_record in metadata.get("artifacts", []):
+                artifact_path = actual_files.get(artifact_record["path"])
+                if (
+                    artifact_path is None
+                    or artifact_path.stat().st_size != artifact_record["size"]
+                    or _hash_file(artifact_path, artifact_record["checksum_algorithm"])
+                    != artifact_record["checksum"]
+                ):
+                    raise DownloadError(f"Release artifact integrity check failed for target '{target.id}'")
             return DownloadResult(primary_path, asset.filename, primary_path.stat().st_size, algorithm, actual, DownloadDisposition.REUSED)
         except DownloadError:
             raise
@@ -422,6 +496,7 @@ def _validate_final_path_compatibility(path: Path, target_id: str) -> None:
 
 def _release_files(root: Path, target_id: str) -> dict[str, Path]:
     result: dict[str, Path] = {}
+    casefolded: set[str] = set()
     root_resolved = root.resolve(strict=True)
     for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
         if path.name == METADATA_NAME and path.parent == root:
@@ -440,7 +515,10 @@ def _release_files(root: Path, target_id: str) -> dict[str, Path]:
             raise DownloadError(f"Unsafe release hard link for target '{target_id}'")
         if relative in result:
             raise DownloadError(f"Duplicate release path for target '{target_id}'")
+        if relative.casefold() in casefolded:
+            raise DownloadError(f"Case-insensitive release path collision for target '{target_id}'")
         result[relative] = path
+        casefolded.add(relative.casefold())
     return result
 
 
@@ -460,10 +538,11 @@ def _inventory_release(root: Path, roles: dict[str, str], target_id: str) -> lis
 def _validate_metadata_schema(value: Any, target_id: str) -> None:
     import re
 
-    if not isinstance(value, dict) or set(value) != {
+    legacy_fields = {
         "schema_version", "target_id", "primary_version", "primary_filename",
         "primary_checksum_algorithm", "primary_checksum", "companions", "completed_at", "files",
-    }:
+    }
+    if not isinstance(value, dict) or set(value) not in {frozenset(legacy_fields), frozenset(legacy_fields | {"artifacts"})}:
         raise DownloadError(f"Release metadata is invalid for target '{target_id}'")
     if value["schema_version"] != 1:
         raise DownloadError(f"Release metadata is invalid for target '{target_id}'")
@@ -485,8 +564,12 @@ def _validate_metadata_schema(value: Any, target_id: str) -> None:
     if not isinstance(value["companions"], list) or not isinstance(value["files"], list):
         raise DownloadError(f"Release metadata is invalid for target '{target_id}'")
     for companion in value["companions"]:
-        if not isinstance(companion, dict) or set(companion) != {
+        legacy_companion_fields = {
             "id", "filename", "action", "sha256", "size", "archive_retained", "extract_to"
+        }
+        if not isinstance(companion, dict) or set(companion) not in {
+            frozenset(legacy_companion_fields),
+            frozenset(legacy_companion_fields | {"strip_single_root"}),
         }:
             raise DownloadError(f"Release metadata is invalid for target '{target_id}'")
         if (
@@ -496,8 +579,40 @@ def _validate_metadata_schema(value: Any, target_id: str) -> None:
             or not isinstance(companion["size"], int) or isinstance(companion["size"], bool) or companion["size"] < 0
             or not isinstance(companion["archive_retained"], bool)
             or (companion["extract_to"] is not None and not isinstance(companion["extract_to"], str))
+            or ("strip_single_root" in companion and not isinstance(companion["strip_single_root"], bool))
         ):
             raise DownloadError(f"Release metadata is invalid for target '{target_id}'")
+    if "artifacts" in value:
+        if not isinstance(value["artifacts"], list) or not value["artifacts"]:
+            raise DownloadError(f"Release metadata is invalid for target '{target_id}'")
+        seen_ids: set[str] = set()
+        seen_paths: set[str] = set()
+        for artifact in value["artifacts"]:
+            if not isinstance(artifact, dict) or set(artifact) != {
+                "id", "artifact_id", "role", "filename", "checksum_algorithm",
+                "checksum", "size", "path",
+            }:
+                raise DownloadError(f"Release metadata is invalid for target '{target_id}'")
+            if any(not isinstance(artifact[key], str) or not artifact[key] for key in (
+                "id", "artifact_id", "role", "filename", "checksum_algorithm", "checksum", "path"
+            )):
+                raise DownloadError(f"Release metadata is invalid for target '{target_id}'")
+            if artifact["role"] not in {"primary", "secondary"}:
+                raise DownloadError(f"Release metadata is invalid for target '{target_id}'")
+            algorithm = artifact["checksum_algorithm"]
+            lengths = {"md5": 32, "sha1": 40, "sha256": 64}
+            if algorithm not in lengths or re.fullmatch(rf"[0-9a-f]{{{lengths.get(algorithm, 0)}}}", artifact["checksum"]) is None:
+                raise DownloadError(f"Release metadata is invalid for target '{target_id}'")
+            if not isinstance(artifact["size"], int) or isinstance(artifact["size"], bool) or artifact["size"] < 0:
+                raise DownloadError(f"Release metadata is invalid for target '{target_id}'")
+            try:
+                _validate_archive_path(artifact["path"], target_id)
+            except DownloadError:
+                raise DownloadError(f"Release metadata is invalid for target '{target_id}'") from None
+            if artifact["id"] in seen_ids or artifact["path"].casefold() in seen_paths:
+                raise DownloadError(f"Release metadata contains duplicate artifact entries for target '{target_id}'")
+            seen_ids.add(artifact["id"])
+            seen_paths.add(artifact["path"].casefold())
     for item in value["files"]:
         if not isinstance(item, dict) or set(item) != {"path", "sha256", "size", "role"}:
             raise DownloadError(f"Release metadata is invalid for target '{target_id}'")
@@ -516,6 +631,28 @@ def _validate_metadata_schema(value: Any, target_id: str) -> None:
             or not isinstance(item.get("size"), int)
             or isinstance(item["size"], bool)
             or item["size"] < 0
-            or item.get("role") not in {"primary", "companion", "extracted"}
+            or item.get("role") not in {"primary", "secondary", "companion", "extracted"}
         ):
             raise DownloadError(f"Release metadata is invalid for target '{target_id}'")
+
+
+def _validate_artifact_records(metadata: dict[str, Any], target: TargetConfig, asset: NexusAsset) -> None:
+    artifacts = metadata.get("artifacts")
+    if artifacts is None:
+        if target.release_artifacts:
+            raise DownloadError(f"Release artifact inventory mismatch for target '{target.id}'")
+        return
+    expected = [("primary", target.nexus.artifact_id, "primary", asset.filename)] + [
+        (
+            configured.id,
+            configured.artifact_id,
+            "secondary",
+            f"{configured.artifact_id}-{asset.version}"
+            + (f"-{target.artifact.classifier}" if target.artifact.classifier else "")
+            + f".{target.artifact.extension}",
+        )
+        for configured in target.release_artifacts
+    ]
+    actual = [(item["id"], item["artifact_id"], item["role"], item["filename"]) for item in artifacts]
+    if actual != expected or any(item["path"] != item["filename"] for item in artifacts):
+        raise DownloadError(f"Release artifact inventory mismatch for target '{target.id}'")

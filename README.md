@@ -6,7 +6,7 @@ M4/M5 added streamed, checksum-verified downloads. M12 changes deployed artifact
 
 M6/M7 add configurable rotating file logging, bounded fixed-delay retry for transient discovery and download failures, and a one-shot synchronization service. M8/M9 connect that service to the CLI, including a read-only dry-run mode. M10 supplies operating-system scheduling examples while keeping the application one-shot.
 
-M13 models a release as one version-discovered primary Maven artifact plus explicitly configured fixed-URL companions. The primary version is the sole release trigger.
+M13 models a release as one version-discovered primary Maven artifact, optional Maven `release_artifacts`, and explicitly configured fixed-URL companions. The primary version is the sole release trigger. Secondary Maven artifacts inherit the primary target's Nexus, repository, group, authentication, network, extension, and classifier settings and are resolved at exactly that version; they are never independently version-selected.
 
 ## Requirements and setup
 
@@ -54,6 +54,8 @@ Completed releases and version directories are append-only: old versions are nev
 Release metadata contains a sorted SHA-256/size inventory of every published regular file, including extracted files. Reuse requires an exact, safe filesystem-tree match; missing, added, changed, linked, or otherwise unsafe nodes invalidate the release. The complete private release tree is published with one same-filesystem directory rename. This requires the staging and destination directory to be on the same filesystem; concurrent cooperating publishers never merge or overwrite a release.
 
 Companions use explicit direct HTTP/HTTPS URLs and either `copy` or `extract_7z`. Every required fixed file must be declared; Maven dependency resolution is not performed. `extract_7z` requires an external 7-Zip executable configured with `tools.seven_zip_executable`. Archives are listed before extraction, extracted without a shell into private staging, inspected again on disk, and rejected for traversal, links, reparse points, unsafe names, or collisions.
+
+`strip_single_root: true` may be set on an `extract_7z` companion when the archive has exactly one non-empty wrapper directory. Only that directory's children are staged; sibling entries, empty wrappers, unsafe nodes, and case-insensitive collisions fail the whole release. The primary, every required secondary JAR, companions, extraction, metadata, and complete inventory are published all-or-nothing. HTTP URLs remain supported only for explicitly accepted trusted internal deployments; HTTP provides no transport confidentiality or integrity, so HTTPS with normal certificate validation is preferred.
 
 Nexus discovery and downloads are strictly HTTP GET-only. The application never uploads, updates, or deletes Nexus content and does not require repository write permissions. Use a least-privilege Nexus identity with only the browse/read permissions needed for configured repositories.
 
