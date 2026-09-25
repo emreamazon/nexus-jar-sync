@@ -12,6 +12,7 @@ import sys
 from nexus_jar_sync.config import ConfigError, load_config
 from nexus_jar_sync.downloader import ArtifactDownloader
 from nexus_jar_sync.logging_config import configure_logging
+from nexus_jar_sync.run_lock import ProductionRunLock, RunLockError
 from nexus_jar_sync.nexus_client import NexusClient
 from nexus_jar_sync.retry import RetryExecutor
 from nexus_jar_sync.release import ReleaseAssembler
@@ -33,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Perform real downloads into an isolated test output",
     )
     parser.add_argument("--test-output", help="New absolute root for --test-download")
+    parser.add_argument("--sanitized-errors", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
@@ -112,17 +114,37 @@ def main(
             print("Logging initialization failed.", file=sys.stderr)
             return 2
 
+    run_lock: ProductionRunLock | None = None
+    if not args.test_download and not args.dry_run:
+        run_lock = ProductionRunLock(config.state.directory)
+        try:
+            run_lock.__enter__()
+        except RunLockError as exc:
+            print(f"Synchronization lock error: {exc}", file=sys.stderr)
+            return 1
+
     factory = service_factory or create_sync_service
-    service = factory(logger)
+    service: SyncService | None = None
     try:
+        service = factory(logger)
         if args.test_download:
             print("TEST DOWNLOAD: performs real network reads and downloads; Nexus and production paths remain read-only.")
             assert output is not None
             summary = service.run_test_download(config, output)
-        else:
+        elif args.dry_run:
             summary = service.run(config, dry_run=args.dry_run)
+        else:
+            summary = service.run(config, dry_run=False)
+    except (Exception, KeyboardInterrupt):
+        if not args.sanitized_errors:
+            raise
+        print("Synchronization failed unexpectedly; inspect the sanitized application log.", file=sys.stderr)
+        return 1
     finally:
-        service.close()
+        if service is not None:
+            service.close()
+        if run_lock is not None:
+            run_lock.__exit__(None, None, None)
     print(format_summary(summary, dry_run=args.dry_run))
     return 1 if summary.failed_count else 0
 

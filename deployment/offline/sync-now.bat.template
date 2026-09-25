@@ -1,0 +1,23 @@
+@echo off
+setlocal DisableDelayedExpansion
+set "INSTALL_ROOT=%~dp0"
+set "PYTHON=%INSTALL_ROOT%__VENV_DIRECTORY__\Scripts\python.exe"
+set "CONFIG=%INSTALL_ROOT%config\config.yaml"
+
+pushd "%INSTALL_ROOT%" || (
+  echo Synchronization failed: installation directory is unavailable.
+  pause >nul
+  exit /b 2
+)
+"%PYTHON%" -m nexus_jar_sync.main --config "%CONFIG%" --sanitized-errors
+set "SYNC_EXIT=%ERRORLEVEL%"
+popd
+
+if "%SYNC_EXIT%"=="0" (
+  echo Synchronization completed successfully.
+) else (
+  echo Synchronization failed with exit code %SYNC_EXIT%.
+)
+echo Press any key to close this window.
+pause >nul
+exit /b %SYNC_EXIT%

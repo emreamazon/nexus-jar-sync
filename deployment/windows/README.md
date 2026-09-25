@@ -1,4 +1,8 @@
-# Windows Task Scheduler deployment
+# Windows manual operation and optional advanced scheduling
+
+The recommended Windows workflow is the guided offline installer followed by double-clicking `sync-now.bat` for each desired synchronization. Every invocation performs one pass and exits; overlapping production runs for the same state directory are rejected by a process-lifetime lock. Guided setup does not create or access Task Scheduler, a service, or a background process.
+
+The scripts below are retained only for backward-compatible advanced deployments. They are not offered or invoked by the default setup. Use them only after a deliberate operational decision to adopt OS scheduling.
 
 These scripts register the existing one-shot Python command. They do not install Python, the package, credentials, or application data, and they do not add an application polling loop.
 
@@ -40,7 +44,7 @@ The chosen account needs GET-only Nexus browse/read access and read/write access
 
 For `extract_7z` companions, install 7-Zip for the task account and configure its exact executable path. Before scheduling, run an isolated real download such as `nexus-jar-sync --config C:\NexusJarSync\config\config.yaml --test-download --test-output C:\NexusJarSyncTest\run-001`; this performs network reads and extraction but does not touch production state or destinations.
 
-The supplied guided offline setup generates a primary-triggered four-JAR configuration, with secondaries resolved at the primary version and dependencies safely flattened from one wrapper directory. Anonymous Nexus read access is the default; credentials are optional environment-variable references. Its scheduler offer uses the reviewed exact root task path and a five-minute interval, with `IgnoreNew` and `StartWhenAvailable`. HTTP endpoints require explicit operator acceptance and should be limited to trusted internal networks because HTTP has no transport integrity.
+The supplied guided offline setup generates a primary-triggered four-JAR configuration, with secondaries resolved at the primary version and dependencies safely flattened from one wrapper directory. Anonymous Nexus read access is the default; credentials are optional environment-variable references. HTTP endpoints require explicit operator acceptance and should be limited to trusted internal networks because HTTP has no transport integrity.
 
 ## Install and operate
 

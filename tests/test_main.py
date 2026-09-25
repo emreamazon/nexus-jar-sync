@@ -66,4 +66,5 @@ def test_cli_runs_active_sync_and_creates_only_logging_side_effect(
     assert "Sync Summary" in capsys.readouterr().out
     assert log_file.exists()
     assert not destination.exists()
-    assert not state_directory.exists()
+    assert (state_directory / ".nexus-jar-sync.lock").is_file()
+    assert not list(state_directory.glob("*.json"))

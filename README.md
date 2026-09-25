@@ -79,12 +79,12 @@ This is not a dry-run: it performs real Nexus GET discovery/downloads and real 7
 
 ## Headless scheduling
 
-The application always performs one synchronization pass and exits. Scheduling frequency belongs to the operating system; no polling loop or scheduler runs inside Python.
+The application always performs one synchronization pass and exits. The recommended Windows operation is to double-click the guided installation's `sync-now.bat`; it invokes the private Python environment once, prints the deterministic summary, preserves the CLI result, and waits for acknowledgement before closing. A process-lifetime lock rejects overlapping production runs for the same state context.
 
-- [Windows Task Scheduler instructions](deployment/windows/README.md)
+- [Windows manual one-click and optional advanced Task Scheduler instructions](deployment/windows/README.md)
 - [Linux systemd instructions](deployment/linux/README.md)
 
-Run one manual dry-run and one manual active run as the intended scheduler account before installation. That account must be able to read its configured credential environment variables and access Nexus, configuration, destinations, state, logs, and any CA bundle. The supplied examples set an explicit working directory and prevent overlapping invocations.
+The guided Windows setup performs no scheduler or service registration. Existing Task Scheduler files remain only as separately invoked advanced/legacy tooling. Run the gated test download, dry-run, and first active pass before relying on `sync-now.bat`.
 
 Headless scheduling is supplied by M10; portable/offline deployment packaging is supplied by M11.
 

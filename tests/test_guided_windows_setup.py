@@ -12,6 +12,7 @@ ROOT = Path(__file__).parents[1]
 BATCH = ROOT / "deployment" / "offline" / "setup-windows.bat"
 HELPER = ROOT / "deployment" / "offline" / "setup-windows.ps1"
 BUILDER = ROOT / "deployment" / "offline" / "build_bundle.py"
+SYNC_TEMPLATE = ROOT / "deployment" / "offline" / "sync-now.bat.template"
 
 
 def text(path: Path) -> str:
@@ -76,27 +77,25 @@ def test_mutating_phases_have_independent_gates_and_failure_boundaries() -> None
         "Start the isolated real test download?",
         "Have you inspected and approved the test output?",
         "Run one active production synchronization?",
-        "Configure Task Scheduler now?",
-        "Register the exact root task",
     ]
     positions = [value.index(gate) for gate in gates]
     assert positions == sorted(positions)
     test_call = value.index("'--test-download','--test-output'")
     dry_run = value.index("'--dry-run'", test_call)
     active = value.index('"active production synchronization"')
-    scheduler = value.index("'deployment\\windows\\install-task.ps1'")
-    assert test_call < dry_run < active < scheduler
+    assert test_call < dry_run < active
+    assert "install-task.ps1" not in value
+    assert "Register-ScheduledTask" not in value
     assert value.count("Invoke-Checked") >= 7
 
 
-def test_test_outputs_are_fresh_and_scheduler_is_never_forced() -> None:
+def test_test_outputs_are_fresh_and_setup_never_accesses_scheduler() -> None:
     value = text(HELPER)
     assert "[Guid]::NewGuid()" in value
     assert "while(Test-Path -LiteralPath $c)" in value
     assert "Test output preserved at" in value
-    scheduler = value[value.index('Write-Phase "7 - Optional Task Scheduler installation"'):]
-    assert "-Force" not in scheduler
-    assert "install-task.ps1" in scheduler
+    assert "Task Scheduler" not in value
+    assert "ScheduledTask" not in value
 
 
 def test_sensitive_values_are_not_arguments_stdout_or_logs() -> None:
@@ -112,6 +111,50 @@ def test_offline_bundle_includes_both_guided_setup_files() -> None:
     value = text(BUILDER)
     assert 'offline / "setup-windows.bat"' in value
     assert 'offline / "setup-windows.ps1"' in value
+    assert 'offline / "sync-now.bat.template"' in value
+
+
+def test_manual_sync_template_is_one_shot_relative_and_preserves_exit_code() -> None:
+    value = text(SYNC_TEMPLATE)
+    assert 'set "INSTALL_ROOT=%~dp0"' in value
+    assert 'set "PYTHON=%INSTALL_ROOT%__VENV_DIRECTORY__\\Scripts\\python.exe"' in value
+    assert 'set "CONFIG=%INSTALL_ROOT%config\\config.yaml"' in value
+    assert 'pushd "%INSTALL_ROOT%"' in value
+    assert value.count('"%PYTHON%" -m nexus_jar_sync.main --config "%CONFIG%" --sanitized-errors') == 1
+    assert 'set "SYNC_EXIT=%ERRORLEVEL%"' in value
+    assert "pause >nul" in value
+    assert "exit /b %SYNC_EXIT%" in value
+    forbidden = ("-m pip", "ScheduledTask", "schtasks", "sc.exe", "while ", "timeout ", "sleep")
+    assert not any(item.lower() in value.lower() for item in forbidden)
+
+
+@pytest.mark.skipif(shutil.which("cmd.exe") is None, reason="Windows command processor unavailable")
+def test_installed_manual_launcher_runs_once_from_space_and_unicode_path(tmp_path: Path) -> None:
+    install = tmp_path / "Kurulum alanı & (test)"
+    python_dir = install / "venv-1.0" / "Scripts"
+    python_dir.mkdir(parents=True)
+    marker = install / "observed.txt"
+    fake_python = python_dir / "python.exe.cmd"
+    fake_python.write_text(
+        '@echo %CD%>>"%~dp0..\\..\\observed.txt"\n'
+        '@echo %*>>"%~dp0..\\..\\observed.txt"\n'
+        '@exit /b 7\n', encoding="ascii"
+    )
+    launcher = install / "sync-now.bat"
+    content = text(SYNC_TEMPLATE).replace(
+        "__VENV_DIRECTORY__\\Scripts\\python.exe",
+        "venv-1.0\\Scripts\\python.exe.cmd",
+    )
+    launcher.write_text(content, encoding="ascii")
+    result = subprocess.run(
+        ["cmd.exe", "/d", "/c", "sync-now.bat"], cwd=install,
+        input="x\n", text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 7
+    observed = marker.read_text(encoding="utf-8")
+    assert observed.count("nexus_jar_sync.main") == 1
+    assert "-m nexus_jar_sync.main --config" in observed
+    assert str(install) in observed
 
 
 def _synthetic_bundle(tmp_path: Path, *, architecture: str | None = None, verifier_exit: int = 0) -> tuple[Path, Path]:

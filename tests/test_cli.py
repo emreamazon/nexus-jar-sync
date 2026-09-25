@@ -7,6 +7,7 @@ import yaml
 
 import nexus_jar_sync.main as main_module
 from nexus_jar_sync.main import main
+from nexus_jar_sync.run_lock import ProductionRunLock
 from nexus_jar_sync.state import ChangeDecision
 from nexus_jar_sync.sync import SyncSummary, TargetSyncResult, TargetSyncStatus
 
@@ -67,6 +68,35 @@ def result(target: str, status: TargetSyncStatus) -> TargetSyncResult:
         change=ChangeDecision.VERSION_CHANGED if status in {TargetSyncStatus.UPDATED, TargetSyncStatus.WOULD_UPDATE} else None,
         message="sanitized failure" if status is TargetSyncStatus.FAILED else "done",
     )
+
+
+def test_active_cli_rejects_overlapping_state_context_without_traceback(
+    tmp_path: Path, capsys
+) -> None:
+    config = write_config(tmp_path)
+    with ProductionRunLock(tmp_path / "state"):
+        assert main(
+            ["--config", str(config)],
+            service_factory=lambda logger: FakeService(pytest.fail("overlap ran service")),
+        ) == 1
+    captured = capsys.readouterr()
+    assert "already running" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_sanitized_error_mode_hides_unexpected_exception_details(
+    tmp_path: Path, capsys
+) -> None:
+    service = FakeService(RuntimeError("private URL and token"))
+    assert main(
+        ["--config", str(write_config(tmp_path)), "--sanitized-errors"],
+        service_factory=lambda logger: service,
+    ) == 1
+    captured = capsys.readouterr()
+    assert "failed unexpectedly" in captured.err
+    assert "private URL" not in captured.err
+    assert "Traceback" not in captured.err
+    assert service.closed
 
 
 @pytest.mark.parametrize(
