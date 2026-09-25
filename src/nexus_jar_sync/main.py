@@ -94,23 +94,30 @@ def main(
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 2
 
-    try:
-        logger = configure_logging(config.logging)
-    except OSError:
-        print("Logging initialization failed.", file=sys.stderr)
-        return 2
+    output: Path | None = None
+    if args.test_download:
+        try:
+            output = _validated_test_output(Path(args.test_output), config)
+            output.mkdir()
+        except (ConfigError, OSError) as exc:
+            print(f"Test output error: {exc}", file=sys.stderr)
+            return 2
+        logger = logging.getLogger("nexus_jar_sync.test_download")
+        logger.handlers = [logging.NullHandler()]
+        logger.propagate = False
+    else:
+        try:
+            logger = configure_logging(config.logging)
+        except OSError:
+            print("Logging initialization failed.", file=sys.stderr)
+            return 2
 
     factory = service_factory or create_sync_service
     service = factory(logger)
     try:
         if args.test_download:
-            try:
-                output = _validated_test_output(Path(args.test_output), config)
-                output.mkdir()
-            except (ConfigError, OSError) as exc:
-                print(f"Test output error: {exc}", file=sys.stderr)
-                return 2
             print("TEST DOWNLOAD: performs real network reads and downloads; Nexus and production paths remain read-only.")
+            assert output is not None
             summary = service.run_test_download(config, output)
         else:
             summary = service.run(config, dry_run=args.dry_run)

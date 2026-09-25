@@ -110,7 +110,7 @@ def make_asset(
 
 
 def temporary_downloads(destination: Path) -> list[Path]:
-    return list(destination.rglob("*.download.tmp"))
+    return [path for path in destination.rglob(".njs-*.tmp") if path.is_file()]
 
 
 def test_request_options_streaming_and_result(tmp_path: Path) -> None:

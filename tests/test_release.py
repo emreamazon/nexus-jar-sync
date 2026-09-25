@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 import hashlib
+import json
+import os
 from pathlib import Path
 import subprocess
 from typing import Any, Iterator
@@ -287,3 +289,133 @@ def test_keep_archive_false_omits_only_staged_archive(tmp_path: Path) -> None:
     assert not (root / "dependencies.7z").exists()
     assert (root / "lib" / "dependency.jar").is_file()
     assert (root / METADATA_NAME).is_file()
+    metadata = json.loads((root / METADATA_NAME).read_text(encoding="utf-8"))
+    assert [item["path"] for item in metadata["files"]] == [
+        "application-1.0.jar", "lib/dependency.jar"
+    ]
+    assert [item["role"] for item in metadata["files"]] == ["primary", "extracted"]
+
+
+@pytest.mark.parametrize("mutation", ["removed", "modified", "unexpected"])
+def test_completed_release_inventory_detects_tree_changes(tmp_path: Path, mutation: str) -> None:
+    configured = replace(target(tmp_path / "destination"), companions=())
+    release = assembler(Session([Response(PRIMARY)]), Session([]), SevenZip())
+    release.assemble(asset(), configured, ToolsConfig())
+    root = tmp_path / "destination" / "1.0"
+    primary = root / "application-1.0.jar"
+    if mutation == "removed":
+        primary.unlink()
+    elif mutation == "modified":
+        primary.write_bytes(b"modified")
+    else:
+        (root / "unexpected.txt").write_text("unexpected", encoding="utf-8")
+    with pytest.raises(DownloadError, match="inventory mismatch|integrity check|checksum conflict"):
+        release.assemble(asset(), configured, ToolsConfig())
+
+
+@pytest.mark.parametrize("mutation", ["duplicate", "malformed", "unsafe"])
+def test_completed_release_rejects_invalid_inventory_metadata(tmp_path: Path, mutation: str) -> None:
+    configured = replace(target(tmp_path / "destination"), companions=())
+    release = assembler(Session([Response(PRIMARY)]), Session([]), SevenZip())
+    release.assemble(asset(), configured, ToolsConfig())
+    metadata_path = tmp_path / "destination" / "1.0" / METADATA_NAME
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if mutation == "duplicate":
+        metadata["files"].append(dict(metadata["files"][0]))
+    elif mutation == "malformed":
+        metadata["files"] = {"not": "a list"}
+    else:
+        metadata["files"][0]["path"] = "../escape.jar"
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    with pytest.raises(DownloadError, match="metadata|duplicate"):
+        release.assemble(asset(), configured, ToolsConfig())
+
+
+def test_publication_failure_leaves_no_final_tree_and_retry_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configured = replace(target(tmp_path / "destination"), companions=())
+    primary = Session([Response(PRIMARY), Response(PRIMARY)])
+    release = assembler(primary, Session([]), SevenZip())
+    original_rename = os.rename
+    failed = False
+
+    def fail_once(source: Path, destination: Path) -> None:
+        nonlocal failed
+        if Path(source).name == "1.0" and not failed:
+            failed = True
+            raise OSError("injected private detail")
+        original_rename(source, destination)
+
+    monkeypatch.setattr("nexus_jar_sync.release.os.rename", fail_once)
+    with pytest.raises(DownloadError, match="Could not publish release"):
+        release.assemble(asset(), configured, ToolsConfig())
+    assert not (tmp_path / "destination" / "1.0").exists()
+    result = release.assemble(asset(), configured, ToolsConfig())
+    assert result.path.is_file()
+    assert not list((tmp_path / "destination").glob(".njs-publish-*.lock"))
+
+
+def test_publication_race_reuses_identical_complete_winner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+
+    configured = replace(target(tmp_path / "destination"), companions=())
+    release = assembler(Session([Response(PRIMARY)]), Session([]), SevenZip())
+
+    def winner_then_fail(source: Path, destination: Path) -> None:
+        shutil.copytree(source, destination)
+        raise OSError("lost publication race")
+
+    monkeypatch.setattr("nexus_jar_sync.release.os.rename", winner_then_fail)
+    result = release.assemble(asset(), configured, ToolsConfig())
+    assert result.disposition is DownloadDisposition.REUSED
+    assert result.path.read_bytes() == PRIMARY
+
+
+def test_publication_race_rejects_conflicting_winner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+
+    configured = replace(target(tmp_path / "destination"), companions=())
+    release = assembler(Session([Response(PRIMARY)]), Session([]), SevenZip())
+
+    def conflicting_winner(source: Path, destination: Path) -> None:
+        shutil.copytree(source, destination)
+        (destination / "application-1.0.jar").write_bytes(b"conflict")
+        raise OSError("lost publication race")
+
+    monkeypatch.setattr("nexus_jar_sync.release.os.rename", conflicting_winner)
+    with pytest.raises(DownloadError, match="conflict|integrity"):
+        release.assemble(asset(), configured, ToolsConfig())
+    assert (tmp_path / "destination" / "1.0" / "application-1.0.jar").read_bytes() == b"conflict"
+
+
+def test_short_private_names_avoid_old_windows_staging_path_expansion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = tmp_path / ("b" * 45)
+    configured = replace(target(base), id="target-" + "x" * 140, companions=())
+    selected = asset("1.0", PRIMARY)
+    assert len(str(base / "1.0" / selected.filename)) < 240
+    assert len(str(base / ("." + configured.id + "-release-xxxxxxxx") / "1.0" / selected.filename)) >= 240
+    monkeypatch.setattr("nexus_jar_sync.release.sys.platform", "win32")
+    result = assembler(Session([Response(PRIMARY)]), Session([]), SevenZip()).assemble(
+        selected, configured, ToolsConfig()
+    )
+    assert result.path == base / "1.0" / selected.filename
+
+
+def test_unsupported_windows_final_path_fails_before_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = tmp_path / ("x" * 210)
+    session = Session([Response(PRIMARY)])
+    monkeypatch.setattr("nexus_jar_sync.release.sys.platform", "win32")
+    with pytest.raises(DownloadError, match="too long"):
+        assembler(session, Session([]), SevenZip()).assemble(
+            asset(), replace(target(base), companions=()), ToolsConfig()
+        )
+    assert not session.calls

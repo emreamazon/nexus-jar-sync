@@ -249,7 +249,7 @@ def test_test_download_requires_absolute_fresh_nonproduction_output(tmp_path: Pa
 
 
 def test_test_download_uses_isolated_service_path_and_reports_network_notice(
-    tmp_path: Path, capsys
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class TestService(FakeService):
         def __init__(self) -> None:
@@ -260,6 +260,7 @@ def test_test_download_uses_isolated_service_path_and_reports_network_notice(
             self.output = output_root
             return self.summary  # type: ignore[return-value]
 
+    monkeypatch.setattr(main_module, "configure_logging", lambda config: pytest.fail("production logging used"))
     service = TestService()
     output = tmp_path / "isolated-output"
     code = main(
@@ -269,7 +270,21 @@ def test_test_download_uses_isolated_service_path_and_reports_network_notice(
     assert code == 0
     assert service.output == output.resolve()
     assert output.is_dir()
+    assert not (tmp_path / "logs").exists()
+    assert not (tmp_path / "state").exists()
+    assert not (tmp_path / "destination").exists()
     assert "real network reads and downloads" in capsys.readouterr().out
     with pytest.raises(SystemExit) as missing_exit:
         main([])
     assert missing_exit.value.code == 2
+
+
+def test_invalid_test_output_has_no_logging_or_filesystem_side_effects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(main_module, "configure_logging", lambda config: pytest.fail("production logging used"))
+    config = write_config(tmp_path)
+    assert main(["--config", str(config), "--test-download", "--test-output", str(tmp_path)]) == 2
+    assert not (tmp_path / "logs").exists()
+    assert not (tmp_path / "state").exists()
+    assert not (tmp_path / "destination").exists()

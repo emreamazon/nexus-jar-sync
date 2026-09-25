@@ -144,8 +144,8 @@ class ArtifactDownloader:
                 temporary_file = tempfile.NamedTemporaryFile(
                     mode="w+b",
                     dir=version_directory,
-                    prefix=f".{asset.filename}.",
-                    suffix=".download.tmp",
+                    prefix=".njs-",
+                    suffix=".tmp",
                     delete=False,
                 )
                 temporary_path = Path(temporary_file.name)

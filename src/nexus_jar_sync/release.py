@@ -11,6 +11,7 @@ from pathlib import Path
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 from typing import Any, Callable, Protocol
 
@@ -74,6 +75,7 @@ class ReleaseAssembler:
             asset, replace(target, destination=replace(target.destination, directory=base))
         )
         final_release = final_primary.parent
+        _validate_final_path_compatibility(final_primary, target.id)
         existing = self._validate_completed_release(final_release, asset, target)
         if existing is not None:
             return existing
@@ -84,7 +86,7 @@ class ReleaseAssembler:
             base.mkdir(parents=True, exist_ok=True)
             if _unsafe_node(base) or not base.is_dir():
                 raise OSError
-            stage_base = Path(tempfile.mkdtemp(prefix=f".{target.id}-release-", dir=base))
+            stage_base = Path(tempfile.mkdtemp(prefix=".njs-", dir=base))
         except OSError:
             raise DownloadError(f"Could not create release staging area for target '{target.id}'") from None
 
@@ -113,6 +115,7 @@ class ReleaseAssembler:
                     )
                 )
             metadata = {
+                "schema_version": 1,
                 "target_id": target.id,
                 "primary_version": asset.version,
                 "primary_filename": asset.filename,
@@ -121,34 +124,58 @@ class ReleaseAssembler:
                 "companions": [asdict(record) for record in records],
                 "completed_at": self._aware_timestamp().isoformat(),
             }
+            roles = {asset.filename: "primary"}
+            roles.update(
+                {
+                    companion.filename: "companion"
+                    for companion in target.companions
+                    if companion.action == "copy" or companion.keep_archive
+                }
+            )
+            metadata["files"] = _inventory_release(release_root, roles, target.id)
             self._write_metadata(release_root / METADATA_NAME, metadata, target)
+            winner = self._publish_release(release_root, final_release, asset, target)
+            return winner or replace(primary, path=final_release / asset.filename)
+        finally:
+            shutil.rmtree(stage_base, ignore_errors=True)
+
+    def _publish_release(
+        self, release_root: Path, final_release: Path, asset: NexusAsset, target: TargetConfig
+    ) -> DownloadResult | None:
+        lock_name = ".njs-publish-" + hashlib.sha256(
+            f"{target.id}\0{asset.version}".encode("utf-8")
+        ).hexdigest()[:16] + ".lock"
+        lock_path = final_release.parent / lock_name
+        descriptor: int | None = None
+        try:
             try:
-                final_release.mkdir()
+                descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             except FileExistsError:
                 winner = self._validate_completed_release(final_release, asset, target)
-                if winner is None:
-                    raise DownloadError(f"Release publication conflict for target '{target.id}'")
-                return winner
+                if winner is not None:
+                    return winner
+                raise DownloadError(f"Release publication is already in progress for target '{target.id}'") from None
+            if final_release.exists() or final_release.is_symlink():
+                winner = self._validate_completed_release(final_release, asset, target)
+                if winner is not None:
+                    return winner
+                raise DownloadError(f"Release publication conflict for target '{target.id}'")
+            try:
+                # Staging is adjacent, so this is one same-filesystem directory rename.
+                os.rename(release_root, final_release)
             except OSError:
                 winner = self._validate_completed_release(final_release, asset, target)
                 if winner is not None:
                     return winner
                 raise DownloadError(f"Could not publish release for target '{target.id}'") from None
-            try:
-                # Directory replacement is not consistently no-clobber. Reserve a new
-                # directory, move staged entries into it, and publish metadata last.
-                entries = sorted(
-                    (path for path in release_root.iterdir() if path.name != METADATA_NAME),
-                    key=lambda path: path.name,
-                )
-                for entry in entries:
-                    os.rename(entry, final_release / entry.name)
-                os.rename(release_root / METADATA_NAME, final_release / METADATA_NAME)
-            except OSError:
-                raise DownloadError(f"Could not publish release for target '{target.id}'") from None
-            return replace(primary, path=final_release / asset.filename)
+            return None
         finally:
-            shutil.rmtree(stage_base, ignore_errors=True)
+            if descriptor is not None:
+                os.close(descriptor)
+                try:
+                    lock_path.unlink()
+                except OSError:
+                    pass
 
     def _download_companion(
         self, companion: CompanionConfig, target: TargetConfig, release_root: Path
@@ -303,18 +330,20 @@ class ReleaseAssembler:
         primary_path = release / asset.filename
         if not metadata_path.is_file():
             return None
-        if _unsafe_node(release) or _unsafe_node(metadata_path) or _unsafe_node(primary_path):
+        if _unsafe_node(release) or _unsafe_node(metadata_path):
             raise DownloadError(f"Unsafe completed release for target '{target.id}'")
         try:
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            _validate_metadata_schema(metadata, target.id)
             algorithm, expected = asset.canonical_checksum
             if (
                 metadata.get("target_id") != target.id
                 or metadata.get("primary_version") != asset.version
                 or metadata.get("primary_filename") != asset.filename
-                or not primary_path.is_file()
             ):
                 return None
+            if not primary_path.is_file() or _unsafe_node(primary_path):
+                raise DownloadError(f"Release file inventory mismatch for target '{target.id}'")
             if (
                 metadata.get("primary_checksum_algorithm") != algorithm
                 or metadata.get("primary_checksum") != expected
@@ -323,16 +352,24 @@ class ReleaseAssembler:
             actual = _hash_file(primary_path, algorithm)
             if actual != expected:
                 raise DownloadError(f"Artifact checksum conflict for target '{target.id}'")
-            for item in metadata.get("companions", []):
-                if item.get("archive_retained"):
-                    path = release / item["filename"]
-                    if _unsafe_node(path) or not path.is_file() or path.stat().st_size != item.get("size") or _hash_file(path, "sha256") != item.get("sha256"):
-                        return None
+            recorded: dict[str, dict[str, Any]] = {}
+            for item in metadata["files"]:
+                relative = item["path"]
+                if relative in recorded:
+                    raise DownloadError(f"Release metadata contains duplicate paths for target '{target.id}'")
+                recorded[relative] = item
+            actual_files = _release_files(release, target.id)
+            if set(actual_files) != set(recorded):
+                raise DownloadError(f"Release file inventory mismatch for target '{target.id}'")
+            for relative, path in actual_files.items():
+                item = recorded[relative]
+                if path.stat().st_size != item["size"] or _hash_file(path, "sha256") != item["sha256"]:
+                    raise DownloadError(f"Release file integrity check failed for target '{target.id}'")
             return DownloadResult(primary_path, asset.filename, primary_path.stat().st_size, algorithm, actual, DownloadDisposition.REUSED)
         except DownloadError:
             raise
-        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
-            return None
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError, AttributeError):
+            raise DownloadError(f"Release metadata is invalid for target '{target.id}'") from None
 
     def _aware_timestamp(self) -> datetime:
         value = self._clock()
@@ -376,3 +413,109 @@ def _validate_tree(root: Path, target_id: str) -> None:
         except OSError:
             raise DownloadError(f"Unsafe extracted filesystem entry for target '{target_id}'") from None
         _validate_archive_path(path.relative_to(root).as_posix(), target_id)
+
+
+def _validate_final_path_compatibility(path: Path, target_id: str) -> None:
+    if sys.platform == "win32" and len(str(path)) >= 240:
+        raise DownloadError(f"Final artifact path is too long for target '{target_id}'")
+
+
+def _release_files(root: Path, target_id: str) -> dict[str, Path]:
+    result: dict[str, Path] = {}
+    root_resolved = root.resolve(strict=True)
+    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+        if path.name == METADATA_NAME and path.parent == root:
+            continue
+        if _unsafe_node(path):
+            raise DownloadError(f"Unsafe release filesystem entry for target '{target_id}'")
+        relative = path.relative_to(root).as_posix()
+        _validate_archive_path(relative, target_id)
+        if path.resolve(strict=True).is_relative_to(root_resolved) is False:
+            raise DownloadError(f"Release path escapes its root for target '{target_id}'")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise DownloadError(f"Unsafe release filesystem entry for target '{target_id}'")
+        if path.stat().st_nlink > 1:
+            raise DownloadError(f"Unsafe release hard link for target '{target_id}'")
+        if relative in result:
+            raise DownloadError(f"Duplicate release path for target '{target_id}'")
+        result[relative] = path
+    return result
+
+
+def _inventory_release(root: Path, roles: dict[str, str], target_id: str) -> list[dict[str, Any]]:
+    files = _release_files(root, target_id)
+    return [
+        {
+            "path": relative,
+            "sha256": _hash_file(path, "sha256"),
+            "size": path.stat().st_size,
+            "role": roles.get(relative, "extracted"),
+        }
+        for relative, path in sorted(files.items())
+    ]
+
+
+def _validate_metadata_schema(value: Any, target_id: str) -> None:
+    import re
+
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version", "target_id", "primary_version", "primary_filename",
+        "primary_checksum_algorithm", "primary_checksum", "companions", "completed_at", "files",
+    }:
+        raise DownloadError(f"Release metadata is invalid for target '{target_id}'")
+    if value["schema_version"] != 1:
+        raise DownloadError(f"Release metadata is invalid for target '{target_id}'")
+    for key in ("target_id", "primary_version", "primary_filename", "primary_checksum_algorithm", "primary_checksum", "completed_at"):
+        if not isinstance(value[key], str) or not value[key]:
+            raise DownloadError(f"Release metadata is invalid for target '{target_id}'")
+    checksum_lengths = {"md5": 32, "sha1": 40, "sha256": 64}
+    algorithm = value["primary_checksum_algorithm"]
+    if algorithm not in checksum_lengths or re.fullmatch(
+        rf"[0-9a-f]{{{checksum_lengths.get(algorithm, 0)}}}", value["primary_checksum"]
+    ) is None:
+        raise DownloadError(f"Release metadata is invalid for target '{target_id}'")
+    try:
+        completed = datetime.fromisoformat(value["completed_at"])
+    except ValueError:
+        raise DownloadError(f"Release metadata is invalid for target '{target_id}'") from None
+    if completed.tzinfo is None or completed.utcoffset() is None:
+        raise DownloadError(f"Release metadata is invalid for target '{target_id}'")
+    if not isinstance(value["companions"], list) or not isinstance(value["files"], list):
+        raise DownloadError(f"Release metadata is invalid for target '{target_id}'")
+    for companion in value["companions"]:
+        if not isinstance(companion, dict) or set(companion) != {
+            "id", "filename", "action", "sha256", "size", "archive_retained", "extract_to"
+        }:
+            raise DownloadError(f"Release metadata is invalid for target '{target_id}'")
+        if (
+            any(not isinstance(companion[key], str) or not companion[key] for key in ("id", "filename", "action", "sha256"))
+            or re.fullmatch(r"[0-9a-f]{64}", companion["sha256"]) is None
+            or companion["action"] not in {"copy", "extract_7z"}
+            or not isinstance(companion["size"], int) or isinstance(companion["size"], bool) or companion["size"] < 0
+            or not isinstance(companion["archive_retained"], bool)
+            or (companion["extract_to"] is not None and not isinstance(companion["extract_to"], str))
+        ):
+            raise DownloadError(f"Release metadata is invalid for target '{target_id}'")
+    for item in value["files"]:
+        if not isinstance(item, dict) or set(item) != {"path", "sha256", "size", "role"}:
+            raise DownloadError(f"Release metadata is invalid for target '{target_id}'")
+        path = item.get("path")
+        if not isinstance(path, str):
+            raise DownloadError(f"Release metadata is invalid for target '{target_id}'")
+        try:
+            _validate_archive_path(path, target_id)
+        except DownloadError:
+            raise DownloadError(f"Release metadata path is invalid for target '{target_id}'") from None
+        if "\\" in path or Path(path).as_posix() != path:
+            raise DownloadError(f"Release metadata path is invalid for target '{target_id}'")
+        if (
+            not isinstance(item.get("sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", item["sha256"]) is None
+            or not isinstance(item.get("size"), int)
+            or isinstance(item["size"], bool)
+            or item["size"] < 0
+            or item.get("role") not in {"primary", "companion", "extracted"}
+        ):
+            raise DownloadError(f"Release metadata is invalid for target '{target_id}'")
