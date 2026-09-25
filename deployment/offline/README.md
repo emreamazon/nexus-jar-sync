@@ -49,6 +49,8 @@ cd C:\NexusJarSyncBundle
 .\install-offline.ps1 -EnvironmentDirectory C:\NexusJarSync\venv-0.1.0 -PythonExecutable python
 ```
 
+For a guided per-user Windows deployment, extract the bundle beneath your user profile and double-click `setup-windows.bat`. It verifies the manifest and host compatibility before making changes, preserves existing environments/configuration/data, reports credential-variable readiness without values, and gates test-download, dry-run, active synchronization, and Task Scheduler registration behind separate confirmations. Defaults are `%USERPROFILE%\NexusJarSync`, `venv-<version>`, `config\config.yaml`, `data`, `logs`, and `test-downloads`; the extracted bundle remains read-only source material. Run `setup-windows.bat -InstallationRoot "D:\Reviewed Path" -PythonExecutable "C:\Path To\python.exe"` for explicit overrides. The wrapper does not bypass PowerShell execution policy; if policy blocks the signed/reviewed helper, contact your administrator.
+
 Linux helper:
 
 ```bash

@@ -13,6 +13,7 @@ WINDOWS = ROOT / "deployment" / "windows"
 LINUX = ROOT / "deployment" / "linux"
 INSTALL = WINDOWS / "install-task.ps1"
 UNINSTALL = WINDOWS / "uninstall-task.ps1"
+GUIDED_SETUP = ROOT / "deployment" / "offline" / "setup-windows.ps1"
 SERVICE = LINUX / "nexus-jar-sync.service.example"
 TIMER = LINUX / "nexus-jar-sync.timer.example"
 
@@ -168,7 +169,7 @@ def test_windows_uninstall_is_exact_idempotent_and_non_destructive() -> None:
         assert forbidden not in script
 
 
-@pytest.mark.parametrize("script_path", [INSTALL, UNINSTALL])
+@pytest.mark.parametrize("script_path", [INSTALL, UNINSTALL, GUIDED_SETUP])
 def test_powershell_scripts_parse_when_powershell_is_available(script_path: Path) -> None:
     executable = powershell_executable()
     if executable is None:
