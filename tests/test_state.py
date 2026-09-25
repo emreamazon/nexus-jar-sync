@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -69,6 +70,33 @@ def test_two_targets_have_independent_state_files(tmp_path: Path) -> None:
     assert store.path_for("one") != store.path_for("two")
     assert store.load("one") == first
     assert store.load("two") == second
+
+
+def test_long_state_directory_and_target_ids_use_short_temporary_names(
+    tmp_path: Path,
+) -> None:
+    # pytest's Windows temporary root plus this child is representative of a
+    # long operator path: the final state name fits, while repeating it in the
+    # temporary prefix would not.
+    state_directory = tmp_path / "state"
+    store = StateStore(state_directory)
+    target_ids = (
+        "application-release-for-a-very-long-independent-target-name-alpha",
+        "application-dependencies-for-a-very-long-independent-target-name-bravo",
+    )
+    states = (make_state(version="1.76.0"), make_state(version="2.0.0"))
+
+    for target_id, state in zip(target_ids, states, strict=True):
+        store.save(target_id, state)
+
+    expected_names = {
+        target_id[:60] + "-" + hashlib.sha256(target_id.encode()).hexdigest() + ".json"
+        for target_id in target_ids
+    }
+    assert {path.name for path in state_directory.glob("*.json")} == expected_names
+    assert store.load(target_ids[0]) == states[0]
+    assert store.load(target_ids[1]) == states[1]
+    assert not list(state_directory.glob(".njs-state-*.tmp"))
 
 
 @pytest.mark.parametrize("target_id", ["../escape", "..\\escape", "/absolute", "C:\\escape"])

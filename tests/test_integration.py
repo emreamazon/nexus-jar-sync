@@ -259,10 +259,12 @@ def test_real_components_isolate_three_targets_and_preserve_order(tmp_path: Path
 def test_two_targets_share_version_directory_and_change_independently(tmp_path: Path) -> None:
     base = target(tmp_path)
     shared = tmp_path / "shared"
-    application = replace(base, id="application", destination=DestinationConfig(shared))
+    application_id = "application-release-for-a-very-long-independent-target-name-alpha"
+    dependencies_id = "application-dependencies-for-a-very-long-independent-target-name-bravo"
+    application = replace(base, id=application_id, destination=DestinationConfig(shared))
     dependencies = replace(
         base,
-        id="application-dependencies",
+        id=dependencies_id,
         nexus=replace(base.nexus, artifact_id="application-dependencies"),
         destination=DestinationConfig(shared),
     )
@@ -279,6 +281,10 @@ def test_two_targets_share_version_directory_and_change_independently(tmp_path: 
     assert first.updated_count == 2
     assert (shared / "1.76.0" / "application-1.76.0.jar").read_bytes() == common
     assert (shared / "1.76.0" / "application-dependencies-1.76.0.jar").read_bytes() == common
+    state_store = StateStore(tmp_path / "state")
+    assert state_store.load(application_id) is not None
+    assert state_store.load(dependencies_id) is not None
+    assert not list((tmp_path / "state").glob(".njs-state-*.tmp"))
 
     newer = b"new-application"
     second_download = DownloadSession(DownloadResponse(newer))
@@ -299,3 +305,7 @@ def test_two_targets_share_version_directory_and_change_independently(tmp_path: 
     assert (shared / "1.76.0" / "application-1.76.0.jar").read_bytes() == common
     assert (shared / "1.76.0" / "application-dependencies-1.76.0.jar").read_bytes() == common
     assert (shared / "1.77.0" / "application-1.77.0.jar").read_bytes() == newer
+    application_state = state_store.load(application_id)
+    dependencies_state = state_store.load(dependencies_id)
+    assert application_state is not None and application_state.version == "1.77.0"
+    assert dependencies_state is not None and dependencies_state.version == "1.76.0"

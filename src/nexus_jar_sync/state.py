@@ -78,7 +78,7 @@ class StateStore:
                 mode="w",
                 encoding="utf-8",
                 dir=self._state_directory,
-                prefix=f".{path.name}.",
+                prefix=".njs-state-",
                 suffix=".tmp",
                 delete=False,
             ) as temporary_file:
