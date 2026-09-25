@@ -9,6 +9,10 @@ logging:
 state:
   directory: "data/state"
 
+tools:
+  seven_zip_executable: "/usr/bin/7z"
+  extraction_timeout_seconds: 300
+
 defaults:
   network:
     timeout_seconds: 30
@@ -23,7 +27,7 @@ defaults:
     extension: "jar"
     classifier: null
 targets:
-# Each required file is a separate target. Matching versions share one child directory.
+# Primary version changes create new complete releases; companion changes alone do not.
   - id: "sample-application"
     enabled: true
     nexus:
@@ -33,24 +37,33 @@ targets:
       artifact_id: "sample-application"
     destination:
       directory: "/srv/nexus-jar-sync/artifacts/application"
+    companions:
+      - id: "dependencies"
+        url: "https://nexus-one.example.invalid/repository/static/dependencies.7z"
+        filename: "dependencies.7z"
+        action: "extract_7z"
+        keep_archive: true
+        extract_to: "."
+      - id: "license"
+        url: "https://nexus-one.example.invalid/repository/static/license.txt"
+        filename: "license.txt"
+        action: "copy"
 
-  - id: "sample-application-dependencies"
+  - id: "sample-independent-tool"
     enabled: true
     nexus:
-      url: "https://nexus-one.example.invalid"
-      repository: "sample-releases"
-      group_id: "org.example.sample"
-      artifact_id: "sample-application"
+      url: "https://nexus-two.example.invalid"
+      repository: "tool-releases"
+      group_id: "org.example.tool"
+      artifact_id: "independent-tool"
     auth:
       username_env: "TOOLS_NEXUS_USERNAME"
       password_env: "TOOLS_NEXUS_PASSWORD"
-    artifact:
-      classifier: "dependencies"
     network:
       timeout_seconds: 15
       retries: 1
     destination:
-      directory: "/srv/nexus-jar-sync/artifacts/application"
+      directory: "/srv/nexus-jar-sync/artifacts/independent-tool"
 
   - id: "sample-disabled"
     enabled: false

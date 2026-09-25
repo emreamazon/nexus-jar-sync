@@ -281,3 +281,40 @@ def test_example_configuration_parses(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.logging.level == "INFO"
     assert config.logging.file == Path("logs/nexus-jar-sync.log")
     assert config.state.directory == Path("data/state")
+
+
+def test_companion_and_tools_configuration_is_typed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NEXUS_USER", "user")
+    monkeypatch.setenv("NEXUS_PASS", "password")
+    value = {
+        "tools": {"seven_zip_executable": "C:/Program Files/7-Zip/7z.exe", "extraction_timeout_seconds": 12},
+        "defaults": {"auth": {"username_env": "NEXUS_USER", "password_env": "NEXUS_PASS"}},
+        "targets": [target(companions=[
+            {"id": "deps", "url": "https://nexus.example.invalid/static/deps.7z", "filename": "deps.7z", "action": "extract_7z", "keep_archive": False, "extract_to": "lib"},
+            {"id": "license", "url": "http://files.example.invalid/license.txt", "filename": "license.txt", "action": "copy"},
+        ])],
+    }
+    loaded = load_config(write_config(tmp_path, value))
+    assert loaded.tools.extraction_timeout_seconds == 12
+    assert loaded.targets[0].companions[0].extract_to == Path("lib")
+    assert loaded.targets[0].companions[0].keep_archive is False
+
+
+@pytest.mark.parametrize("url", ["relative/file", "file:///tmp/x", "https:///missing", "https://user:pass@example.invalid/x"])
+def test_unsafe_companion_url_is_rejected(tmp_path: Path, url: str) -> None:
+    with pytest.raises(ConfigError, match="Companion URL"):
+        load_config(write_config(tmp_path, {"targets": [target(companions=[{"id": "one", "url": url, "filename": "one.txt", "action": "copy"}])]}))
+
+
+@pytest.mark.parametrize("field", ["../x", "C:/x", "CON", "trail.", "a/b"])
+def test_unsafe_companion_filename_is_rejected(tmp_path: Path, field: str) -> None:
+    with pytest.raises(ConfigError, match="filename is unsafe"):
+        load_config(write_config(tmp_path, {"targets": [target(companions=[{"id": "one", "url": "https://example.invalid/x", "filename": field, "action": "copy"}])]}))
+
+
+def test_unknown_and_duplicate_companions_are_rejected(tmp_path: Path) -> None:
+    companion = {"id": "one", "url": "https://example.invalid/x", "filename": "x.txt", "action": "copy"}
+    with pytest.raises(ConfigError, match="Unknown field"):
+        load_config(write_config(tmp_path, {"targets": [target(companions=[{**companion, "secret": "bad"}])]}))
+    with pytest.raises(ConfigError, match="Duplicate companion"):
+        load_config(write_config(tmp_path, {"targets": [target(companions=[companion, companion])]}))

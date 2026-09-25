@@ -10,6 +10,11 @@ logging:
 state:
   directory: "data/state"
 
+# Replace with the exact 7-Zip executable path for this host.
+tools:
+  seven_zip_executable: "REVIEW-AND-SET-ABSOLUTE-7Z-PATH"
+  extraction_timeout_seconds: 300
+
 defaults:
   network:
     timeout_seconds: 30
@@ -27,8 +32,8 @@ defaults:
     classifier: null
 
 targets:
-# Every required Nexus file is an independent target. Matching versions below
-# share the same base/version directory without being grouped transactionally.
+# The primary Maven version is the sole trigger. Fixed companions are fetched
+# only while assembling a new append-only primary release.
   - id: "example-application"
     enabled: true
     nexus:
@@ -38,24 +43,33 @@ targets:
       artifact_id: "sample-application"
     destination:
       directory: "artifacts/sample-application"
+    companions:
+      - id: "dependencies"
+        url: "https://nexus-one.example.invalid/repository/static/dependencies.7z"
+        filename: "dependencies.7z"
+        action: "extract_7z"
+        keep_archive: true
+        extract_to: "."
+      - id: "license"
+        url: "https://nexus-one.example.invalid/repository/static/license.txt"
+        filename: "license.txt"
+        action: "copy"
 
-  - id: "example-application-dependencies"
+  - id: "example-independent-tool"
     enabled: true
     nexus:
-      url: "https://nexus-one.example.invalid"
-      repository: "sample-releases"
-      group_id: "org.example.sample"
-      artifact_id: "sample-application"
+      url: "https://nexus-two.example.invalid"
+      repository: "tool-releases"
+      group_id: "org.example.tool"
+      artifact_id: "independent-tool"
     auth:
       username_env: "LIBRARY_NEXUS_USERNAME"
       password_env: "LIBRARY_NEXUS_PASSWORD"
-    artifact:
-      classifier: "dependencies"
     network:
       timeout_seconds: 10
       retries: 1
     destination:
-      directory: "artifacts/sample-application"
+      directory: "artifacts/independent-tool"
 
   - id: "example-disabled"
     enabled: false

@@ -38,6 +38,8 @@ The script converts that secure credential only in memory because the ScheduledT
 
 The chosen account needs GET-only Nexus browse/read access and read/write access to configured destination bases, state, and logs, plus read access to the config and any CA bundle. Each exact Nexus version becomes an append-only child directory of its destination base; old artifacts are not cleaned up. Credential environment variables must be visible to that same account.
 
+For `extract_7z` companions, install 7-Zip for the task account and configure its exact executable path. Before scheduling, run an isolated real download such as `nexus-jar-sync --config C:\NexusJarSync\config\config.yaml --test-download --test-output C:\NexusJarSyncTest\run-001`; this performs network reads and extraction but does not touch production state or destinations.
+
 ## Install and operate
 
 Run from an appropriately privileged PowerShell session:

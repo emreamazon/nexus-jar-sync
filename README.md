@@ -6,6 +6,8 @@ M4/M5 added streamed, checksum-verified downloads. M12 changes deployed artifact
 
 M6/M7 add configurable rotating file logging, bounded fixed-delay retry for transient discovery and download failures, and a one-shot synchronization service. M8/M9 connect that service to the CLI, including a read-only dry-run mode. M10 supplies operating-system scheduling examples while keeping the application one-shot.
 
+M13 models a release as one version-discovered primary Maven artifact plus explicitly configured fixed-URL companions. The primary version is the sole release trigger.
+
 ## Requirements and setup
 
 Python 3.12 or newer is required.
@@ -45,9 +47,11 @@ Run one synchronization pass over all enabled targets:
 nexus-jar-sync --config config/config.yaml
 ```
 
-`destination.directory` is a base directory. Each target is stored at `<base>/<exact validated Nexus version>/<artifact filename>`. Every required Nexus file is a separate configured target; targets with the same base and version safely share the version directory while remaining independently discovered, downloaded, retried, reported, and recorded in state.
+`destination.directory` is a base directory. Each target publishes a completed release at `<base>/<exact validated primary version>/`. The primary Maven artifact and that target's fixed companions live together there. Separate independently versioned applications remain separate targets.
 
-Deployed artifacts and version directories are append-only: old versions are never deleted or overwritten. An existing file with the expected checksum is reused without downloading; a same-version checksum conflict fails and requires operator investigation. Existing artifacts in the former flat layout are left untouched and are not migrated automatically. Only owned download temporaries, atomically replaced state files, and rotating logs are operational exceptions to artifact immutability.
+Completed releases and version directories are append-only: old versions are never deleted, refreshed, or overwritten. Each new primary version downloads fresh copies of all configured companions. Companion content, timestamps, and headers never trigger a release independently. A same-version primary checksum conflict fails and requires operator investigation. Existing artifacts in the former flat layout are left untouched and are not migrated automatically. Only owned staging content, atomically replaced state files, and rotating logs are operational exceptions to artifact immutability. Disk usage therefore grows and must be monitored externally.
+
+Companions use explicit direct HTTP/HTTPS URLs and either `copy` or `extract_7z`. Every required fixed file must be declared; Maven dependency resolution is not performed. `extract_7z` requires an external 7-Zip executable configured with `tools.seven_zip_executable`. Archives are listed before extraction, extracted without a shell into private staging, inspected again on disk, and rejected for traversal, links, reparse points, unsafe names, or collisions.
 
 Nexus discovery and downloads are strictly HTTP GET-only. The application never uploads, updates, or deletes Nexus content and does not require repository write permissions. Use a least-privilege Nexus identity with only the browse/read permissions needed for configured repositories.
 
@@ -60,6 +64,14 @@ nexus-jar-sync --config config/config.yaml --dry-run
 Dry-run reads Nexus metadata and existing state, and still performs bounded discovery retries. It does not create JARs, version or state directories, or save state. Configured logging may create or append to its log file.
 
 Both modes print a deterministic per-target summary. Exit code `0` means all enabled targets completed successfully (including targets that would update during a dry run), `1` means at least one target failed, and `2` means configuration loading or logging initialization failed. Unexpected programming errors and interrupts are not hidden.
+
+To exercise the complete current release workflow without touching production destinations or state, use a new absolute directory:
+
+```text
+nexus-jar-sync --config config/config.yaml --test-download --test-output C:/NexusJarSyncTest/run-001
+```
+
+This is not a dry-run: it performs real Nexus GET discovery/downloads and real 7-Zip extraction. It never writes Nexus, production state, or configured production destinations. The output must not already exist and cannot overlap protected paths. Inspect the isolated releases before active deployment. `--test-download` and `--dry-run` are mutually exclusive.
 
 ## Headless scheduling
 

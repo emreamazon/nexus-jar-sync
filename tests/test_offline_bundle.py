@@ -280,7 +280,8 @@ def test_multi_jar_examples_load_with_environment_credentials(
     config = load_config(ROOT / "config" / example)
     assert len(config.enabled_targets) == 2
     assert any(target.artifact.classifier is None for target in config.enabled_targets)
-    assert any(target.artifact.classifier is not None for target in config.enabled_targets)
+    assert any(target.companions for target in config.enabled_targets)
+    assert any(not target.companions for target in config.enabled_targets)
     assert any(not target.enabled for target in config.targets)
 
 

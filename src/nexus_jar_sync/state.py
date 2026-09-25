@@ -27,6 +27,8 @@ class TargetState:
     checksum_algorithm: str
     checksum: str
     downloaded_at: str
+    release_directory: str | None = None
+    metadata_path: str | None = None
 
 
 class ChangeDecision(Enum):
@@ -121,6 +123,10 @@ def _state_from_mapping(value: Any, target_id: str) -> TargetState:
         field_value = value.get(field_name)
         if not isinstance(field_value, str) or not field_value.strip():
             raise StateError(f"State field '{field_name}' is invalid for target '{target_id}'")
+    for field_name in ("release_directory", "metadata_path"):
+        field_value = value.get(field_name)
+        if field_value is not None and (not isinstance(field_value, str) or not field_value.strip()):
+            raise StateError(f"State field '{field_name}' is invalid for target '{target_id}'")
     algorithm = value["checksum_algorithm"].strip().lower()
     if algorithm not in {"sha256", "sha1", "md5"}:
         raise StateError(
@@ -140,4 +146,6 @@ def _state_from_mapping(value: Any, target_id: str) -> TargetState:
         checksum_algorithm=algorithm,
         checksum=value["checksum"].strip().lower(),
         downloaded_at=value["downloaded_at"],
+        release_directory=value.get("release_directory"),
+        metadata_path=value.get("metadata_path"),
     )

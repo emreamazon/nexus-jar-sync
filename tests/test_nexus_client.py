@@ -438,7 +438,7 @@ def test_close_closes_owned_session(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_production_nexus_transport_is_get_only() -> None:
     root = Path(__file__).parents[1] / "src" / "nexus_jar_sync"
-    for source_name in ("nexus_client.py", "downloader.py"):
+    for source_name in ("nexus_client.py", "downloader.py", "release.py"):
         tree = ast.parse((root / source_name).read_text(encoding="utf-8"))
         methods = {
             node.func.attr.lower()

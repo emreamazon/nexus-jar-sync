@@ -60,6 +60,23 @@ class ArtifactConfig:
 
 
 @dataclass(frozen=True)
+class ToolsConfig:
+    seven_zip_executable: Path | None = None
+    extraction_timeout_seconds: float = 300
+
+
+@dataclass(frozen=True)
+class CompanionConfig:
+    id: str
+    url: str
+    filename: str
+    action: str
+    keep_archive: bool = True
+    extract_to: Path = Path(".")
+    auth: AuthConfig | None = None
+
+
+@dataclass(frozen=True)
 class NexusConfig:
     url: str
     repository: str
@@ -81,6 +98,7 @@ class TargetConfig:
     network: NetworkConfig
     auth: AuthConfig
     artifact: ArtifactConfig
+    companions: tuple[CompanionConfig, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -88,6 +106,7 @@ class AppConfig:
     targets: tuple[TargetConfig, ...]
     logging: LoggingConfig = LoggingConfig()
     state: StateConfig = StateConfig()
+    tools: ToolsConfig = ToolsConfig()
 
     @property
     def enabled_targets(self) -> tuple[TargetConfig, ...]:
@@ -111,6 +130,10 @@ _DEFAULT_LOGGING: dict[str, Any] = {
     "backup_count": 3,
 }
 _DEFAULT_STATE: dict[str, Any] = {"directory": "data/state"}
+_DEFAULT_TOOLS: dict[str, Any] = {
+    "seven_zip_executable": None,
+    "extraction_timeout_seconds": 300,
+}
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -144,6 +167,7 @@ def load_config(path: str | Path) -> AppConfig:
         raise ConfigError("'defaults.target' is obsolete; deployed artifacts are append-only")
     logging_config = _parse_logging(_merged_section(_DEFAULT_LOGGING, root, "logging", "root"))
     state_config = _parse_state(_merged_section(_DEFAULT_STATE, root, "state", "root"))
+    tools_config = _parse_tools(_merged_section(_DEFAULT_TOOLS, root, "tools", "root"))
 
     targets: list[TargetConfig] = []
     seen_ids: set[str] = set()
@@ -159,10 +183,17 @@ def load_config(path: str | Path) -> AppConfig:
             raise ConfigError(f"Duplicate target id: '{target.id}'")
         seen_ids.add(target.id)
         targets.append(target)
+    if any(
+        companion.action == "extract_7z"
+        for target in targets
+        for companion in target.companions
+    ) and tools_config.seven_zip_executable is None:
+        raise ConfigError("'tools.seven_zip_executable' is required for extract_7z companions")
     return AppConfig(
         targets=tuple(targets),
         logging=logging_config,
         state=state_config,
+        tools=tools_config,
     )
 
 
@@ -244,6 +275,7 @@ def _parse_target(
     network_values = _merged_section(default_network, raw, "network", f"target '{target_id}'")
     auth_values = _merged_section(default_auth, raw, "auth", f"target '{target_id}'")
     artifact_values = _merged_section(default_artifact, raw, "artifact", f"target '{target_id}'")
+    companions = _parse_companions(raw.get("companions", []), target_id, auth_values)
 
     return TargetConfig(
         id=target_id,
@@ -253,7 +285,64 @@ def _parse_target(
         network=_parse_network(network_values, target_id),
         auth=_parse_auth(auth_values, target_id),
         artifact=_parse_artifact(artifact_values, target_id),
+        companions=companions,
     )
+
+
+def _parse_tools(values: Mapping[str, Any]) -> ToolsConfig:
+    _validate_allowed_keys(
+        values,
+        frozenset({"seven_zip_executable", "extraction_timeout_seconds"}),
+        "'tools'",
+    )
+    executable = values.get("seven_zip_executable")
+    if executable is not None and (not isinstance(executable, str) or not executable.strip()):
+        raise ConfigError("'tools.seven_zip_executable' must be a non-empty path or null")
+    timeout = values.get("extraction_timeout_seconds")
+    if not _is_finite_real(timeout) or timeout <= 0:
+        raise ConfigError("'tools.extraction_timeout_seconds' must be a finite number greater than 0")
+    return ToolsConfig(Path(executable.strip()) if executable is not None else None, timeout)
+
+
+def _parse_companions(
+    value: Any, target_id: str, default_auth: Mapping[str, Any]
+) -> tuple[CompanionConfig, ...]:
+    from urllib.parse import urlsplit
+
+    if not isinstance(value, list):
+        raise ConfigError(f"'companions' must be a list for target '{target_id}'")
+    result: list[CompanionConfig] = []
+    seen: set[str] = set()
+    allowed = frozenset({"id", "url", "filename", "action", "keep_archive", "extract_to", "auth"})
+    for index, item in enumerate(value):
+        raw = _mapping(item, f"Companion at index {index} for target '{target_id}'")
+        _validate_allowed_keys(raw, allowed, f"companion in target '{target_id}'")
+        companion_id = _required_text(raw, "id", f"companion in target '{target_id}'")
+        if companion_id in seen:
+            raise ConfigError(f"Duplicate companion id '{companion_id}' for target '{target_id}'")
+        seen.add(companion_id)
+        url = _required_text(raw, "url", f"companion '{companion_id}'")
+        parsed = urlsplit(url)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+            raise ConfigError(f"Companion URL is invalid for target '{target_id}'")
+        filename = _required_text(raw, "filename", f"companion '{companion_id}'")
+        if not _safe_relative_path(filename, allow_subdirectories=False):
+            raise ConfigError(f"Companion filename is unsafe for target '{target_id}'")
+        if filename == ".nexus-jar-sync-release.json":
+            raise ConfigError(f"Companion filename is reserved for target '{target_id}'")
+        action = _required_text(raw, "action", f"companion '{companion_id}'")
+        if action not in {"copy", "extract_7z"}:
+            raise ConfigError(f"Companion action is invalid for target '{target_id}'")
+        keep = raw.get("keep_archive", True)
+        if not isinstance(keep, bool):
+            raise ConfigError(f"'keep_archive' must be a boolean for target '{target_id}'")
+        extract_text = raw.get("extract_to", ".")
+        if not isinstance(extract_text, str) or not _safe_relative_path(extract_text, allow_subdirectories=True):
+            raise ConfigError(f"'extract_to' is unsafe for target '{target_id}'")
+        auth_values = _merged_section(default_auth, raw, "auth", f"companion '{companion_id}'")
+        auth = _parse_auth(auth_values, target_id) if "auth" in raw else None
+        result.append(CompanionConfig(companion_id, url, filename, action, keep, Path(extract_text), auth))
+    return tuple(result)
 
 
 def _parse_network(values: Mapping[str, Any], target_id: str) -> NetworkConfig:
@@ -357,3 +446,29 @@ def _is_int(value: Any) -> bool:
 
 def _is_finite_real(value: Any) -> bool:
     return isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _safe_relative_path(value: str, *, allow_subdirectories: bool) -> bool:
+    import re
+    from pathlib import PurePosixPath, PureWindowsPath
+
+    if not value or "\x00" in value or any(ord(character) < 32 for character in value):
+        return False
+    if PureWindowsPath(value).is_absolute() or PureWindowsPath(value).drive or PurePosixPath(value).is_absolute():
+        return False
+    normalized = value.replace("\\", "/")
+    parts = normalized.split("/")
+    if not allow_subdirectories and len(parts) != 1:
+        return False
+    reserved = {"CON", "PRN", "AUX", "NUL"} | {f"COM{i}" for i in range(1, 10)} | {f"LPT{i}" for i in range(1, 10)}
+    for part in parts:
+        if not part or part == ".." or (part == "." and normalized != "."):
+            return False
+        if part != "." and (
+            part[-1] in {" ", "."}
+            or any(character in '<>:"|?*' for character in part)
+            or part.split(".", 1)[0].upper() in reserved
+            or re.match(r"^[A-Za-z]:", part)
+        ):
+            return False
+    return True

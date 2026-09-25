@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclass_replace
 from datetime import datetime, timezone
 from enum import Enum
 import hmac
@@ -19,6 +19,8 @@ from nexus_jar_sync.downloader import (
 )
 from nexus_jar_sync.nexus_client import NexusAsset, NexusClient, NexusClientError
 from nexus_jar_sync.retry import RetryExecutor
+from nexus_jar_sync.release import ReleaseAssembler
+from nexus_jar_sync.release import METADATA_NAME
 from nexus_jar_sync.state import ChangeDecision, StateError, StateStore, TargetState, determine_change
 
 
@@ -65,6 +67,7 @@ class SyncService:
         *,
         nexus_client: NexusClient,
         downloader: ArtifactDownloader,
+        release_assembler: ReleaseAssembler | None = None,
         retry_executor: RetryExecutor,
         state_store_factory: Callable[[Path], StateStore] = StateStore,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
@@ -72,12 +75,14 @@ class SyncService:
     ) -> None:
         self._nexus_client = nexus_client
         self._downloader = downloader
+        self._release_assembler = release_assembler
         self._retry = retry_executor
         self._state_store_factory = state_store_factory
         self._clock = clock
         self._logger = logger or logging.getLogger("nexus_jar_sync.sync")
 
     def run(self, config: AppConfig, *, dry_run: bool = False) -> SyncSummary:
+        self._config = config
         enabled_targets = config.enabled_targets
         self._logger.info(
             "%s started with %d enabled targets",
@@ -99,9 +104,41 @@ class SyncService:
         )
         return summary
 
+    def run_test_download(self, config: AppConfig, output_root: Path) -> SyncSummary:
+        if self._release_assembler is None:
+            raise ValueError("test download requires a release assembler")
+        self._config = config
+        results: list[TargetSyncResult] = []
+        for target in config.enabled_targets:
+            asset: NexusAsset | None = None
+            try:
+                asset = self._retry.run(
+                    lambda: self._nexus_client.get_latest_asset(target),
+                    retries=target.network.retries,
+                    retry_delay_seconds=target.network.retry_delay_seconds,
+                    operation_name="asset discovery",
+                    target_id=target.id,
+                )
+                target_root = output_root / _safe_test_target_id(target.id)
+                download = self._retry.run(
+                    lambda: self._release_assembler.assemble(
+                        asset, target, config.tools, destination_base=target_root
+                    ),
+                    retries=target.network.retries,
+                    retry_delay_seconds=target.network.retry_delay_seconds,
+                    operation_name="test release download",
+                    target_id=target.id,
+                )
+                self._validate_download_result_for_base(download, asset, target, target_root)
+                results.append(TargetSyncResult(target.id, TargetSyncStatus.UPDATED, asset.version, None, f"Downloaded test release {asset.version} to {download.path.parent}"))
+            except (NexusClientError, DownloadError) as error:
+                results.append(TargetSyncResult(target.id, TargetSyncStatus.FAILED, asset.version if asset else None, None, str(error)))
+        return SyncSummary(tuple(results))
+
     def close(self) -> None:
         """Close production-owned resources without closing injected sessions."""
-        for component in (self._nexus_client, self._downloader):
+        components = (self._nexus_client, self._release_assembler or self._downloader)
+        for component in components:
             close = getattr(component, "close", None)
             if close is not None:
                 try:
@@ -148,7 +185,9 @@ class SyncService:
                     message=f"Would update to version {asset.version}",
                 )
             download = self._retry.run(
-                lambda: self._downloader.download(asset, target),
+                lambda: self._release_assembler.assemble(asset, target, self._config.tools)
+                if self._release_assembler is not None
+                else self._downloader.download(asset, target),
                 retries=target.network.retries,
                 retry_delay_seconds=target.network.retry_delay_seconds,
                 operation_name="artifact download",
@@ -183,6 +222,8 @@ class SyncService:
                     checksum_algorithm=download.checksum_algorithm,
                     checksum=download.checksum,
                     downloaded_at=timestamp.isoformat(),
+                    release_directory=str(download.path.parent),
+                    metadata_path=str(download.path.parent / METADATA_NAME),
                 ),
             )
             self._logger.info("Target %s: state updated", target.id)
@@ -218,3 +259,18 @@ class SyncService:
             raise DownloadError(
                 f"Download result does not match selected asset for target '{target.id}'"
             )
+
+    @staticmethod
+    def _validate_download_result_for_base(
+        result: DownloadResult, asset: NexusAsset, target: TargetConfig, base: Path
+    ) -> None:
+        temporary_target = dataclass_replace(
+            target, destination=dataclass_replace(target.destination, directory=base)
+        )
+        SyncService._validate_download_result(result, asset, temporary_target)
+
+
+def _safe_test_target_id(value: str) -> str:
+    if not value or value in {".", ".."} or any(character in value for character in '/\\<>:"|?*'):
+        raise DownloadError("Unsafe target id for test output")
+    return value

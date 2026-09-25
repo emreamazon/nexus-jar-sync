@@ -2,6 +2,8 @@
 
 This guide prepares a bundle on a connected staging computer and installs it on a compatible offline computer. Build separately for each destination operating system, architecture, and compatible Python 3.12+ version. Dependency wheels are platform-sensitive; a Windows wheelhouse is not promised to work on Linux, or vice versa. The bundle does not include Python.
 
+The bundle also does not include 7-Zip. Install an organization-approved compatible 7-Zip separately on the offline destination and set the exact executable path in `tools.seven_zip_executable` before using any `extract_7z` companion.
+
 The SHA-256 manifest detects missing, additional, or modified files after generation. It is not a signature and does not authenticate an untrusted source.
 
 ## Build on the connected staging computer
@@ -76,7 +78,7 @@ Copy-Item -LiteralPath .\config\config.windows.example.yaml -Destination $config
 cp --no-clobber config/config.linux.example.yaml /etc/nexus-jar-sync/config.yaml
 ```
 
-The examples show multiple independent targets, shared defaults, per-target credentials, classifier and main JARs, network overrides, shared append-only version directories, and disabled targets. Each required file is a separate YAML target. `destination.directory` is the base; the exact validated Nexus version is created beneath it. Old artifacts are never removed, and flat-layout artifacts are not migrated. Define the referenced credential environment variables through the approved mechanism for the eventual scheduler account; never put values in YAML or the bundle.
+The examples show a primary Maven JAR with fixed `dependencies.7z` and `license.txt` companions plus a second independent target. `destination.directory` is the base; the primary version is the only release trigger and creates an append-only child directory. Companion changes do not refresh a completed release. Old releases are never removed, and flat-layout artifacts are not migrated. Define referenced credential environment variables through the approved mechanism for the eventual scheduler account; never put values in YAML or the bundle.
 
 Nexus access is GET-only. Give the runtime identity only the browse/read permissions required for its configured repositories.
 

@@ -224,6 +224,52 @@ def test_help_and_missing_config_are_argparse_errors(capsys) -> None:
         main(["--help"])
     assert help_exit.value.code == 0
     assert "--dry-run" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--test-download"],
+        ["--test-output", "C:/test-output"],
+        ["--test-download", "--test-output", "C:/test-output", "--dry-run"],
+    ],
+)
+def test_test_download_option_combinations_are_rejected(
+    tmp_path: Path, arguments: list[str]
+) -> None:
+    with pytest.raises(SystemExit) as caught:
+        main(["--config", str(write_config(tmp_path)), *arguments])
+    assert caught.value.code == 2
+
+
+def test_test_download_requires_absolute_fresh_nonproduction_output(tmp_path: Path) -> None:
+    config_path = write_config(tmp_path)
+    for output in ("relative", str(tmp_path), str(tmp_path / "destination")):
+        assert main(["--config", str(config_path), "--test-download", "--test-output", output]) == 2
+
+
+def test_test_download_uses_isolated_service_path_and_reports_network_notice(
+    tmp_path: Path, capsys
+) -> None:
+    class TestService(FakeService):
+        def __init__(self) -> None:
+            super().__init__(SyncSummary((result("one", TargetSyncStatus.UPDATED),)))
+            self.output: Path | None = None
+
+        def run_test_download(self, config, output_root: Path) -> SyncSummary:
+            self.output = output_root
+            return self.summary  # type: ignore[return-value]
+
+    service = TestService()
+    output = tmp_path / "isolated-output"
+    code = main(
+        ["--config", str(write_config(tmp_path)), "--test-download", "--test-output", str(output.resolve())],
+        service_factory=lambda logger: service,
+    )
+    assert code == 0
+    assert service.output == output.resolve()
+    assert output.is_dir()
+    assert "real network reads and downloads" in capsys.readouterr().out
     with pytest.raises(SystemExit) as missing_exit:
         main([])
     assert missing_exit.value.code == 2

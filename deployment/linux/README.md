@@ -79,3 +79,5 @@ sudo systemctl daemon-reload
 ```
 
 Removing units does not remove application files, configuration, credentials, logs, state, or synchronized JARs. Configured destinations are bases containing exact-version child directories; deployed artifacts are append-only. Nexus access is GET-only, so grant the service account only repository browse/read permissions. Remove operational data separately only under your organization’s policy.
+
+Install an organization-approved 7-Zip command separately when `extract_7z` companions are configured and set its absolute path in `tools.seven_zip_executable`. Before enabling the timer, run an isolated real test as the service identity with `--test-download --test-output /var/tmp/nexus-jar-sync-test-run-001`; it performs GET downloads and extraction but does not read or write production state or destinations.
