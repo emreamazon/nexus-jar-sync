@@ -3,6 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import re
+import shutil
+import tempfile
+import uuid
 
 import pytest
 
@@ -45,6 +49,16 @@ def make_asset(**overrides: object) -> NexusAsset:
     return NexusAsset(**values)  # type: ignore[arg-type]
 
 
+def legacy_path(state_directory: Path, target_id: str) -> Path:
+    readable = re.sub(r"[^A-Za-z0-9._-]+", "_", target_id).strip("._-") or "target"
+    return state_directory / f"{readable[:60]}-{hashlib.sha256(target_id.encode()).hexdigest()}.json"
+
+
+def write_state(path: Path, state: TargetState) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state.__dict__), encoding="utf-8")
+
+
 def test_missing_state_returns_none_without_filesystem_side_effect(tmp_path: Path) -> None:
     state_directory = tmp_path / "state"
     assert StateStore(state_directory).load("one") is None
@@ -72,13 +86,14 @@ def test_two_targets_have_independent_state_files(tmp_path: Path) -> None:
     assert store.load("two") == second
 
 
-def test_long_state_directory_and_target_ids_use_short_temporary_names(
-    tmp_path: Path,
-) -> None:
-    # pytest's Windows temporary root plus this child is representative of a
-    # long operator path: the final state name fits, while repeating it in the
-    # temporary prefix would not.
-    state_directory = tmp_path / "state"
+def test_long_state_directory_and_target_ids_use_bounded_canonical_names() -> None:
+    short_root = Path(tempfile.gettempdir()).resolve()
+    desired_directory_length = 150
+    stem = ".njs-state-path-" + uuid.uuid4().hex + "-"
+    filler_length = desired_directory_length - len(str(short_root)) - 1 - len(stem)
+    if filler_length < 1 or filler_length > 120:
+        pytest.skip("host temporary root cannot represent the controlled path budget")
+    state_directory = short_root / (stem + "x" * filler_length)
     store = StateStore(state_directory)
     target_ids = (
         "application-release-for-a-very-long-independent-target-name-alpha",
@@ -86,17 +101,26 @@ def test_long_state_directory_and_target_ids_use_short_temporary_names(
     )
     states = (make_state(version="1.76.0"), make_state(version="2.0.0"))
 
-    for target_id, state in zip(target_ids, states, strict=True):
-        store.save(target_id, state)
+    try:
+        canonical_length = len(str(store.path_for(target_ids[0])))
+        former_length = len(str(legacy_path(state_directory, target_ids[0])))
+        assert canonical_length <= 240
+        assert former_length >= 260
+        for target_id, state in zip(target_ids, states, strict=True):
+            store.save(target_id, state)
+        assert store.load(target_ids[0]) == states[0]
+        assert store.load(target_ids[1]) == states[1]
+        assert not list(state_directory.glob(".njs-state-*.tmp"))
+    finally:
+        shutil.rmtree(state_directory, ignore_errors=True)
 
-    expected_names = {
-        target_id[:60] + "-" + hashlib.sha256(target_id.encode()).hexdigest() + ".json"
-        for target_id in target_ids
-    }
-    assert {path.name for path in state_directory.glob("*.json")} == expected_names
-    assert store.load(target_ids[0]) == states[0]
-    assert store.load(target_ids[1]) == states[1]
-    assert not list(state_directory.glob(".njs-state-*.tmp"))
+
+@pytest.mark.parametrize("target_id", ["one", "../escape", "C:\\escape", "x" * 1000])
+def test_canonical_filename_is_fixed_full_sha256(target_id: str, tmp_path: Path) -> None:
+    path = StateStore(tmp_path).path_for(target_id)
+    assert path.parent == tmp_path
+    assert path.name == hashlib.sha256(target_id.encode()).hexdigest() + ".json"
+    assert len(path.name) == 69
 
 
 @pytest.mark.parametrize("target_id", ["../escape", "..\\escape", "/absolute", "C:\\escape"])
@@ -114,6 +138,43 @@ def test_unsafe_target_ids_remain_inside_state_directory(tmp_path: Path, target_
 def test_similarly_sanitized_target_ids_do_not_collide(tmp_path: Path) -> None:
     store = StateStore(tmp_path)
     assert store.path_for("team/app") != store.path_for("team\\app")
+
+
+def test_legacy_only_state_loads_without_migration_then_save_creates_canonical(
+    tmp_path: Path,
+) -> None:
+    store = StateStore(tmp_path)
+    old_path = legacy_path(tmp_path, "application")
+    original = make_state(version="1.0")
+    write_state(old_path, original)
+    assert store.load("application") == original
+    assert old_path.is_file()
+    assert not store.path_for("application").exists()
+    store.save("application", make_state(version="2.0"))
+    assert old_path.is_file()
+    assert store.path_for("application").is_file()
+
+
+def test_canonical_precedes_legacy_and_canonical_corruption_does_not_fall_back(
+    tmp_path: Path,
+) -> None:
+    store = StateStore(tmp_path)
+    write_state(legacy_path(tmp_path, "application"), make_state(version="1.0"))
+    write_state(store.path_for("application"), make_state(version="2.0"))
+    assert store.load("application") == make_state(version="2.0")
+    store.path_for("application").write_text("{broken", encoding="utf-8")
+    with pytest.raises(StateError, match="invalid JSON"):
+        store.load("application")
+
+
+def test_malformed_legacy_state_fails_without_arbitrary_file_discovery(tmp_path: Path) -> None:
+    store = StateStore(tmp_path)
+    legacy_path(tmp_path, "application").write_text("{broken", encoding="utf-8")
+    similarly_named = tmp_path / ("other-" + hashlib.sha256(b"application").hexdigest() + ".json")
+    write_state(similarly_named, make_state())
+    with pytest.raises(StateError, match="invalid JSON"):
+        store.load("application")
+    assert similarly_named.is_file()
 
 
 def test_invalid_json_raises_without_deleting_file(tmp_path: Path) -> None:
@@ -167,6 +228,24 @@ def test_failed_replace_preserves_existing_state_and_cleans_temp(
         store.save("one", make_state(version="2.0"))
     assert store.load("one") == original
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_failed_replace_preserves_canonical_and_legacy_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = StateStore(tmp_path)
+    canonical = store.path_for("one")
+    old_path = legacy_path(tmp_path, "one")
+    write_state(canonical, make_state(version="1.0"))
+    write_state(old_path, make_state(version="0.9"))
+    canonical_before = canonical.read_bytes()
+    legacy_before = old_path.read_bytes()
+    monkeypatch.setattr(state_module.os, "replace", lambda source, destination: (_ for _ in ()).throw(OSError("failure")))
+    with pytest.raises(StateError, match="Could not save state"):
+        store.save("one", make_state(version="2.0"))
+    assert canonical.read_bytes() == canonical_before
+    assert old_path.read_bytes() == legacy_before
+    assert not list(tmp_path.glob(".njs-state-*.tmp"))
 
 
 @pytest.mark.parametrize(

@@ -50,6 +50,10 @@ class StateStore:
         self._state_directory = Path(state_directory)
 
     def path_for(self, target_id: str) -> Path:
+        digest = hashlib.sha256(target_id.encode("utf-8")).hexdigest()
+        return self._state_directory / f"{digest}.json"
+
+    def _legacy_path_for(self, target_id: str) -> Path:
         readable = re.sub(r"[^A-Za-z0-9._-]+", "_", target_id).strip("._-") or "target"
         readable = readable[:60]
         digest = hashlib.sha256(target_id.encode("utf-8")).hexdigest()
@@ -58,7 +62,9 @@ class StateStore:
     def load(self, target_id: str) -> TargetState | None:
         path = self.path_for(target_id)
         if not path.exists():
-            return None
+            path = self._legacy_path_for(target_id)
+            if not path.exists():
+                return None
         try:
             with path.open("r", encoding="utf-8") as state_file:
                 value = json.load(state_file)

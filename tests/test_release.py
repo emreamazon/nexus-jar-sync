@@ -6,7 +6,9 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import tempfile
 from typing import Any, Iterator
+import uuid
 
 import pytest
 import requests
@@ -394,18 +396,27 @@ def test_publication_race_rejects_conflicting_winner(
 
 
 def test_short_private_names_avoid_old_windows_staging_path_expansion(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    base = tmp_path / ("b" * 45)
+    short_root = Path(tempfile.gettempdir()).resolve()
+    stem = ".njs-release-path-" + uuid.uuid4().hex + "-"
+    filler_length = 190 - len(str(short_root)) - 1 - len(stem)
+    if filler_length < 1 or filler_length > 120:
+        pytest.skip("host temporary root cannot represent the controlled path budget")
+    base = short_root / (stem + "x" * filler_length)
     configured = replace(target(base), id="target-" + "x" * 140, companions=())
     selected = asset("1.0", PRIMARY)
     assert len(str(base / "1.0" / selected.filename)) < 240
     assert len(str(base / ("." + configured.id + "-release-xxxxxxxx") / "1.0" / selected.filename)) >= 240
     monkeypatch.setattr("nexus_jar_sync.release.sys.platform", "win32")
-    result = assembler(Session([Response(PRIMARY)]), Session([]), SevenZip()).assemble(
-        selected, configured, ToolsConfig()
-    )
-    assert result.path == base / "1.0" / selected.filename
+    try:
+        result = assembler(Session([Response(PRIMARY)]), Session([]), SevenZip()).assemble(
+            selected, configured, ToolsConfig()
+        )
+        assert result.path == base / "1.0" / selected.filename
+    finally:
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
 
 
 def test_unsupported_windows_final_path_fails_before_network(
