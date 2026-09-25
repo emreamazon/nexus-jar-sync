@@ -197,6 +197,25 @@ def test_secondary_failure_never_publishes_partial_release(tmp_path: Path) -> No
     assert not (tmp_path / "destination" / "1.0").exists()
 
 
+def test_secondary_checksum_failure_never_publishes_partial_release(tmp_path: Path) -> None:
+    configured = replace(
+        target(tmp_path / "destination"), companions=(),
+        release_artifacts=(ReleaseArtifactConfig("secondary", "other"),),
+    )
+    release = assembler(
+        Session([Response(PRIMARY), Response(b"wrong secondary bytes")]),
+        Session([]), SevenZip(),
+    )
+    with pytest.raises(DownloadError, match="checksum does not match"):
+        release.assemble(
+            asset(), configured, ToolsConfig(),
+            secondary_resolver=lambda artifact_id: artifact_asset(
+                artifact_id, "1.0", b"expected secondary bytes"
+            ),
+        )
+    assert not (tmp_path / "destination" / "1.0").exists()
+
+
 def test_secondary_tampering_invalidates_completed_release(tmp_path: Path) -> None:
     configured = replace(
         target(tmp_path / "destination"), companions=(),
@@ -390,6 +409,127 @@ def test_isolated_test_download_ignores_state_and_writes_only_under_test_root(tm
     assert not (tmp_path / "production-state").exists()
 
 
+def test_isolated_test_download_builds_four_artifact_flattened_release(tmp_path: Path) -> None:
+    primary_body = b"windows versions"
+    secondary_bodies = {
+        "windows-obs": b"windows obs",
+        "linux-versions": b"linux versions",
+        "linux-obs": b"linux obs",
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.latest_calls = 0
+            self.secondary_calls: list[tuple[str, str]] = []
+
+        def get_latest_asset(self, configured: TargetConfig) -> NexusAsset:
+            self.latest_calls += 1
+            return artifact_asset("windows-versions", "1.76.0", primary_body)
+
+        def get_asset_at_version(
+            self, configured: TargetConfig, artifact_id: str, version: str
+        ) -> NexusAsset:
+            self.secondary_calls.append((artifact_id, version))
+            return artifact_asset(artifact_id, version, secondary_bodies[artifact_id])
+
+    class WrapperSevenZip(SevenZip):
+        def __call__(self, command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            self.calls.append((command, kwargs))
+            if command[1] == "l":
+                return subprocess.CompletedProcess(
+                    command, 0, "Path = dependency-wrapper/lib/runtime.jar\n", ""
+                )
+            output = Path(next(item[2:] for item in command if item.startswith("-o")))
+            (output / "dependency-wrapper" / "lib").mkdir(parents=True)
+            (output / "dependency-wrapper" / "lib" / "runtime.jar").write_bytes(
+                b"runtime dependency"
+            )
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+    client = Client()
+    download_session = Session([
+        Response(primary_body),
+        Response(secondary_bodies["windows-obs"]),
+        Response(secondary_bodies["linux-versions"]),
+        Response(secondary_bodies["linux-obs"]),
+    ])
+    companion_session = Session([Response(ARCHIVE), Response(LICENSE)])
+    runner = WrapperSevenZip()
+    downloader = ArtifactDownloader(download_session)
+    service = SyncService(
+        nexus_client=client,  # type: ignore[arg-type]
+        downloader=downloader,
+        release_assembler=ReleaseAssembler(
+            downloader, companion_session, command_runner=runner
+        ),
+        retry_executor=RetryExecutor(sleep=lambda seconds: None),
+        state_store_factory=lambda path: pytest.fail("test mode must not construct state"),
+    )
+    configured = replace(
+        target(tmp_path / "production"),
+        nexus=NexusConfig(
+            "https://nexus.example.invalid", "releases", "org.example", "windows-versions"
+        ),
+        release_artifacts=(
+            ReleaseArtifactConfig("windows-obfuscated", "windows-obs"),
+            ReleaseArtifactConfig("linux", "linux-versions"),
+            ReleaseArtifactConfig("linux-obfuscated", "linux-obs"),
+        ),
+        companions=(
+            replace(
+                target(tmp_path).companions[0],
+                keep_archive=False,
+                strip_single_root=True,
+            ),
+            target(tmp_path).companions[1],
+        ),
+    )
+    from nexus_jar_sync.config import AppConfig, StateConfig
+
+    output = tmp_path / "test-output"
+    output.mkdir()
+    summary = service.run_test_download(
+        AppConfig(
+            (configured,),
+            state=StateConfig(tmp_path / "production-state"),
+            tools=ToolsConfig(Path("7z.exe"), 30),
+        ),
+        output,
+    )
+
+    assert summary.results[0].status is TargetSyncStatus.UPDATED
+    root = output / configured.id / "1.76.0"
+    assert sorted(path.name for path in root.glob("*.jar")) == [
+        "linux-obs-1.76.0.jar",
+        "linux-versions-1.76.0.jar",
+        "windows-obs-1.76.0.jar",
+        "windows-versions-1.76.0.jar",
+    ]
+    assert not (root / "dependencies.7z").exists()
+    assert not (root / "dependency-wrapper").exists()
+    assert (root / "lib" / "runtime.jar").read_bytes() == b"runtime dependency"
+    assert (root / "license.txt").read_bytes() == LICENSE
+    metadata = json.loads((root / METADATA_NAME).read_text(encoding="utf-8"))
+    assert [record["artifact_id"] for record in metadata["artifacts"]] == [
+        "windows-versions", "windows-obs", "linux-versions", "linux-obs"
+    ]
+    assert {record["path"] for record in metadata["files"]} == {
+        "windows-versions-1.76.0.jar", "windows-obs-1.76.0.jar",
+        "linux-versions-1.76.0.jar", "linux-obs-1.76.0.jar",
+        "license.txt", "lib/runtime.jar",
+    }
+    assert client.latest_calls == 1
+    assert client.secondary_calls == [
+        ("windows-obs", "1.76.0"),
+        ("linux-versions", "1.76.0"),
+        ("linux-obs", "1.76.0"),
+    ]
+    assert len(download_session.calls) == 4
+    assert len(companion_session.calls) == 2
+    assert not configured.destination.directory.exists()
+    assert not (tmp_path / "production-state").exists()
+
+
 def test_extracted_file_collision_with_companion_aborts_publication(tmp_path: Path) -> None:
     class CollisionSevenZip(SevenZip):
         def __call__(self, command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -454,7 +594,7 @@ def test_strip_single_root_publishes_only_wrapper_children(
     assert (root / "dependencies.7z").exists() is keep_archive
 
 
-@pytest.mark.parametrize("shape", ["siblings", "file", "empty"])
+@pytest.mark.parametrize("shape", ["siblings", "sibling_file", "file", "empty"])
 def test_strip_single_root_rejects_invalid_top_level_shape(tmp_path: Path, shape: str) -> None:
     class InvalidWrapper(SevenZip):
         def __call__(self, command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -467,6 +607,8 @@ def test_strip_single_root_rejects_invalid_top_level_shape(tmp_path: Path, shape
                 (output / "wrapper").mkdir(parents=True)
                 if shape == "siblings":
                     (output / "other").mkdir()
+                elif shape == "sibling_file":
+                    (output / "sibling.txt").write_text("not inside wrapper")
             return subprocess.CompletedProcess(command, 0, "", "")
 
     companion = replace(target(tmp_path).companions[0], strip_single_root=True)
@@ -475,6 +617,34 @@ def test_strip_single_root_rejects_invalid_top_level_shape(tmp_path: Path, shape
         assembler(Session([Response(PRIMARY)]), Session([Response(ARCHIVE)]), InvalidWrapper()).assemble(
             asset(), configured, ToolsConfig(Path("7z.exe"), 30)
         )
+    assert not (tmp_path / "destination" / "1.0").exists()
+
+
+def test_strip_single_root_rejects_case_insensitive_flattening_collision(
+    tmp_path: Path,
+) -> None:
+    class CaseCollisionWrapper(SevenZip):
+        def __call__(self, command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if command[1] == "l":
+                return subprocess.CompletedProcess(
+                    command, 0, "Path = wrapper/LICENSE.TXT\n", ""
+                )
+            output = Path(next(item[2:] for item in command if item.startswith("-o")))
+            (output / "wrapper").mkdir(parents=True)
+            (output / "wrapper" / "LICENSE.TXT").write_text("collision")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+    companion = replace(target(tmp_path).companions[0], strip_single_root=True)
+    # Copy the lower-case name first, then flatten an upper-case equivalent.
+    configured = replace(
+        target(tmp_path / "destination"),
+        companions=(target(tmp_path).companions[1], companion),
+    )
+    with pytest.raises(DownloadError, match="collision"):
+        assembler(
+            Session([Response(PRIMARY)]), Session([Response(LICENSE), Response(ARCHIVE)]),
+            CaseCollisionWrapper(),
+        ).assemble(asset(), configured, ToolsConfig(Path("7z.exe"), 30))
     assert not (tmp_path / "destination" / "1.0").exists()
 
 
